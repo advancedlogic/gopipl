@@ -76,6 +76,21 @@ type Model struct {
 	invite     string
 	showInvite bool
 
+	// separate forces per-recipient keys even when sending to everyone,
+	// so the message stays individually revocable (CLI: -separate).
+	separate bool
+
+	// hidden lists this peer's hidden objects. They cannot appear in the
+	// message list — nothing decrypts — so restoring one needs its own
+	// picker rather than a guess at which was meant.
+	hidden     []chat.Hidden
+	hiddenIdx  int
+	showHidden bool
+
+	// confirm holds a pending destructive action awaiting y/n.
+	confirm     string
+	confirmWhat func(Model) (tea.Model, tea.Cmd)
+
 	// live refresh
 	cancelFollow context.CancelFunc
 	followingID  string

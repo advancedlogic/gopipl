@@ -251,12 +251,15 @@ func (m Model) viewChat() string {
 	}
 	rb.WriteString("\n")
 	switch {
-	case m.everyoneSelected():
-		rb.WriteString(styMuted.Render("group key\n1 slot, 1 grant"))
 	case m.noneSelected():
 		rb.WriteString(styErr.Render("nobody\nselected"))
+	case m.everyoneSelected() && !m.separate:
+		rb.WriteString(styMuted.Render("group key\n1 slot, 1 grant"))
 	default:
 		rb.WriteString(styWarn.Render("per-recipient\nkeys"))
+	}
+	if m.separate {
+		rb.WriteString(styWarn.Render("\n[p] forced"))
 	}
 
 	recipPanel := styPanel
@@ -276,17 +279,47 @@ func (m Model) viewChat() string {
 	keys := "tab=switch pane  enter=send  esc=back  ctrl+c=quit"
 	switch m.focus {
 	case focusRecipients:
-		keys = "space=toggle  a=all  i=invite  tab=switch pane  esc=back"
+		keys = "space=toggle  a=all  p=per-recipient keys  i=invite  tab=switch pane"
 	case focusHistory:
-		keys = "↑/↓=select  h=hide  u=unhide  r=revoke highlighted  i=invite  tab=switch pane"
+		keys = "↑/↓=select  h=hide  u=unhide…  r=revoke  s=soft-revoke  d=delete  i=invite"
 	}
 
+	width := m.history.Width + m.sidebarWidth() + 2
+
 	if m.showInvite {
-		body = styPanelHot.Width(m.history.Width + m.sidebarWidth() + 2).Render(
+		body = styPanelHot.Width(width).Render(
 			styTitle.Render("invite code") + "\n" +
 				styMuted.Render("Anyone with this can ask to join. It carries no key:\n"+
 					"access still needs a member key sealed to their identity.") + "\n\n" +
 				m.invite)
+		keys = "i or esc=close"
+	}
+
+	// Hidden messages decrypt for nobody, so they cannot appear in the
+	// history — they get their own picker, previewed from the owner's
+	// retained layer keys.
+	if m.showHidden {
+		var hb strings.Builder
+		hb.WriteString(styTitle.Render("hidden messages") + "  " +
+			styMuted.Render("(only you can see these)") + "\n\n")
+		for i, h := range m.hidden {
+			preview := h.Preview
+			if preview == "" {
+				preview = styMuted.Render("(cannot preview)")
+			}
+			line := fmt.Sprintf("%s  %s", styMuted.Render(short(h.ObjectID)), preview)
+			if i == m.hiddenIdx {
+				hb.WriteString(stySelected.Render("› "+line) + "\n")
+			} else {
+				hb.WriteString("  " + line + "\n")
+			}
+		}
+		body = styPanelHot.Width(width).Render(hb.String())
+		keys = "↑/↓=select  enter=restore  esc=close"
+	}
+
+	if m.confirmWhat != nil {
+		keys = styWarn.Render(m.confirm)
 	}
 
 	return title + "\n" + body + "\n" + m.input.View() + m.footer(keys)

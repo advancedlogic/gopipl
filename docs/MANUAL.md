@@ -373,16 +373,36 @@ When creating, leave the folder blank to use the relay. Pick members with
 ```
 
 - **message box** — type, `enter` sends
-- **recipients** — `space` toggles who gets it, `a` selects everyone,
-  `i` shows the invite code. The panel always tells you which encryption
-  mode you're about to use: `group key` or `per-recipient keys`.
-- **history** — `↑`/`↓` to pick a message, then `h` hide, `u` unhide,
-  `r` revoke the recipient currently highlighted in the recipients pane
+- **recipients** — who gets the next message:
+
+  | key | |
+  |---|---|
+  | `space` | include/exclude the highlighted person |
+  | `a` | select everyone |
+  | `p` | force per-recipient keys (same as `-separate`) |
+  | `i` | show the invite code |
+
+- **history** — act on a sent message:
+
+  | key | |
+  |---|---|
+  | `↑` `↓` | pick a message |
+  | `h` | hide from everyone (reversible) |
+  | `u` | open the hidden list, pick one, `enter` restores it |
+  | `r` | revoke the recipient highlighted in the recipients pane |
+  | `s` | soft-revoke them (weak — see §7) |
+  | `d` | delete for everyone (asks `y/N`; irreversible) |
 
 `esc` goes back, `ctrl+c` quits.
 
 The recipients pane is the important one: it shows, before you press
-enter, exactly who will be able to read what you're about to send.
+enter, exactly who will be able to read what you're about to send, and
+names the encryption mode — `group key` or `per-recipient keys`.
+
+Everything the flag commands can do, the UI can do. Hidden messages get
+their own list under `u`, because a hidden message decrypts for nobody and
+so cannot appear in the history — though you, as its sender, still see a
+preview there.
 
 ---
 

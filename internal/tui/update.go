@@ -406,6 +406,24 @@ func (m Model) keyJoinConv(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // ---- chat ------------------------------------------------------------------
 
 func (m Model) keyChat(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// A pending destructive action swallows every key until answered.
+	if m.confirmWhat != nil {
+		switch msg.String() {
+		case "y", "Y":
+			act := m.confirmWhat
+			m.confirm, m.confirmWhat = "", nil
+			return act(m)
+		default:
+			m.confirm, m.confirmWhat = "", nil
+			m.setStatus("cancelled")
+			return m, nil
+		}
+	}
+	// The hidden-message picker likewise takes priority.
+	if m.showHidden {
+		return m.keyHidden(msg)
+	}
+
 	switch msg.Type {
 	case tea.KeyEsc:
 		if m.showInvite { // esc closes the invite overlay first
@@ -472,6 +490,11 @@ func (m Model) keyRecipients(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "a":
 		m.selectAll()
 		m.describeAudience()
+	case "p":
+		// Force per-recipient keys even when sending to everyone, so the
+		// message stays individually revocable later (CLI: -separate).
+		m.separate = !m.separate
+		m.describeAudience()
 	case "i":
 		return m.toggleInvite()
 	}
@@ -483,6 +506,8 @@ func (m Model) keyRecipients(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m *Model) describeAudience() {
 	sel := m.selectedRecipients()
 	switch {
+	case m.everyoneSelected() && m.separate:
+		m.setStatus("everyone, per-recipient keys — costs a grant each, but any one is revocable alone")
 	case m.everyoneSelected():
 		m.setStatus("everyone selected — group key (one slot, one grant, any group size)")
 	case m.noneSelected():
@@ -508,9 +533,13 @@ func (m Model) keyHistory(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "h":
 		return m.hideSelected()
 	case "u":
-		return m.unhideSelected()
+		return m.openHidden()
 	case "r":
 		return m.revokeSelected()
+	case "s":
+		return m.softRevokeSelected()
+	case "d":
+		return m.deleteSelected()
 	case "i":
 		return m.toggleInvite()
 	}
@@ -545,7 +574,7 @@ func (m Model) send() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	sel := m.selectedRecipients()
-	res, err := m.env.Send(m.conv.Name, body, sel, false)
+	res, err := m.env.Send(m.conv.Name, body, sel, m.separate)
 	if err != nil {
 		m.setError(err)
 		return m, nil
@@ -585,30 +614,105 @@ func (m Model) hideSelected() (tea.Model, tea.Cmd) {
 	return m, m.loadMessages()
 }
 
-func (m Model) unhideSelected() (tea.Model, tea.Cmd) {
-	// A hidden message is invisible in the list, so unhide works on the
-	// most recently hidden object this peer owns.
-	owned, err := m.env.St.Owned()
+// openHidden shows the hidden-message picker. Hidden objects decrypt for
+// nobody, so they cannot appear in the history — but the owner kept every
+// layer key, so it can still preview its own.
+func (m Model) openHidden() (tea.Model, tea.Cmd) {
+	list, err := m.env.HiddenObjects(m.conv)
 	if err != nil {
 		m.setError(err)
 		return m, nil
 	}
-	var target string
-	for id, o := range owned {
-		if o.Hidden && o.ConversationID == m.conv.ID {
-			target = id
-			break
-		}
-	}
-	if target == "" {
+	if len(list) == 0 {
 		m.setStatus("nothing hidden in this conversation")
 		return m, nil
 	}
-	if err := m.env.Unhide(m.conv.Name, target); err != nil {
+	m.hidden = list
+	m.hiddenIdx = 0
+	m.showHidden = true
+	m.setStatus("pick a hidden message to restore")
+	return m, nil
+}
+
+func (m Model) keyHidden(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "q", "u":
+		m.showHidden = false
+		m.status = ""
+		return m, nil
+	case "up", "k":
+		if m.hiddenIdx > 0 {
+			m.hiddenIdx--
+		}
+		return m, nil
+	case "down", "j":
+		if m.hiddenIdx < len(m.hidden)-1 {
+			m.hiddenIdx++
+		}
+		return m, nil
+	case "enter":
+		if m.hiddenIdx >= len(m.hidden) {
+			return m, nil
+		}
+		target := m.hidden[m.hiddenIdx].ObjectID
+		if err := m.env.Unhide(m.conv.Name, target); err != nil {
+			m.setError(err)
+			return m, nil
+		}
+		m.showHidden = false
+		m.setStatus("restored %s — every previous grant works again, nothing was re-granted", short(target))
+		return m, m.loadMessages()
+	}
+	return m, nil
+}
+
+// deleteSelected is `revoke -all`: the object and every grant for it are
+// destroyed. Irreversible, so it is confirmed.
+func (m Model) deleteSelected() (tea.Model, tea.Cmd) {
+	sel, ok := m.selectedMessage()
+	if !ok {
+		return m, nil
+	}
+	if !sel.Mine {
+		m.setStatus("only the sender can delete a message")
+		return m, nil
+	}
+	m.confirm = fmt.Sprintf("delete %s for everyone? this cannot be undone  [y/N]", short(sel.ObjectID))
+	m.confirmWhat = func(m Model) (tea.Model, tea.Cmd) {
+		if err := m.env.RevokeAll(m.conv.Name, sel.ObjectID); err != nil {
+			m.setError(err)
+			return m, nil
+		}
+		m.setStatus("deleted %s for everyone (object and all grants removed)", short(sel.ObjectID))
+		m.notice = "anyone who already read it may have kept a copy — revocation cannot un-share."
+		return m, m.loadMessages()
+	}
+	return m, nil
+}
+
+// softRevokeSelected is `revoke -soft`: delete one recipient's grant
+// without re-keying. Deliberately labelled as the weak tier.
+func (m Model) softRevokeSelected() (tea.Model, tea.Cmd) {
+	sel, ok := m.selectedMessage()
+	if !ok {
+		return m, nil
+	}
+	if !sel.Mine {
+		m.setStatus("only the sender can revoke a message")
+		return m, nil
+	}
+	others := m.others()
+	if m.recipIdx >= len(others) {
+		m.setStatus("highlight a recipient (tab to recipients) to soft-revoke them")
+		return m, nil
+	}
+	target := others[m.recipIdx]
+	if err := m.env.RevokeSoft(m.conv.Name, sel.ObjectID, target); err != nil {
 		m.setError(err)
 		return m, nil
 	}
-	m.setStatus("restored %s — every previous grant works again, nothing was re-granted", short(target))
+	m.setStatus("soft-revoked %s from %s — grant deleted", short(sel.ObjectID), target)
+	m.notice = "soft revoke is weak: a cached access key still opens the slot. Use r for a hard revoke."
 	return m, m.loadMessages()
 }
 

@@ -3,6 +3,7 @@ package chat
 import (
 	"crypto/ed25519"
 	"fmt"
+	"sort"
 
 	"github.com/antonio/pipl/internal/object"
 	"github.com/antonio/pipl/internal/relay"
@@ -16,6 +17,72 @@ type ErrNotOwner struct{ ObjectID string }
 
 func (e ErrNotOwner) Error() string {
 	return fmt.Sprintf("you do not own object %s (only the sender can do this)", e.ObjectID)
+}
+
+// Hidden is one object this peer has hidden. Hidden objects are, by
+// design, invisible in the message list — nothing decrypts — so a UI needs
+// this to show them and let the user pick which to restore.
+type Hidden struct {
+	ObjectID string
+	// Preview is the message body, which the owner can still read because
+	// it holds every layer key. Empty if it cannot be recovered.
+	Preview string
+}
+
+// HiddenObjects lists what this peer has hidden in a conversation, oldest
+// first by object ID so the order is stable across calls.
+func (e *Env) HiddenObjects(conv state.Conversation) ([]Hidden, error) {
+	owned, err := e.St.Owned()
+	if err != nil {
+		return nil, err
+	}
+	var out []Hidden
+	for id, o := range owned {
+		if !o.Hidden || o.ConversationID != conv.ID {
+			continue
+		}
+		h := Hidden{ObjectID: id}
+		if body, err := e.peek(conv, o); err == nil {
+			h.Preview = body
+		}
+		out = append(out, h)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ObjectID < out[j].ObjectID })
+	return out, nil
+}
+
+// peek decrypts an object the owner hid, using the layer keys it kept.
+// This works where OpenWithCapability does not: a hidden object has no key
+// slot for anyone, but the owner never needed a slot — it holds the layer
+// keys directly.
+func (e *Env) peek(conv state.Conversation, o state.OwnedObject) (string, error) {
+	be, err := e.backendFor(conv)
+	if err != nil {
+		return "", err
+	}
+	data, err := be.GetObject(o.ObjectID)
+	if err != nil {
+		return "", err
+	}
+	for _, key := range o.LayerKeys {
+		d, err := object.Decode(data)
+		if err != nil {
+			return "", err
+		}
+		pt, err := d.Decrypt(key)
+		if err != nil {
+			return "", err
+		}
+		if !d.Header.Wrapped {
+			p, err := object.ParsePayload(pt)
+			if err != nil {
+				return "", err
+			}
+			return p.Body, nil
+		}
+		data = pt
+	}
+	return "", fmt.Errorf("could not reach the payload")
 }
 
 // Owned reports the owner-side record for an object, if this peer sent it.

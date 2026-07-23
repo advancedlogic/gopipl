@@ -243,6 +243,205 @@ func TestChatViewShowsRecipientsAndAudienceModel(t *testing.T) {
 	}
 }
 
+// Every destructive or mode-changing operation the flag CLI offers must
+// be reachable from the UI too, or the two front ends have drifted.
+
+func TestPForcesPerRecipientKeysForWholeRoster(t *testing.T) {
+	m := newChatModel(t, "alice", "bob", "carol")
+	if m.separate {
+		t.Fatal("per-recipient mode should be off by default")
+	}
+	m.focus = focusRecipients
+	m2 := drive(m, keyRunes("p")).(Model)
+
+	if !m2.separate {
+		t.Fatal("p did not enable per-recipient keys")
+	}
+	// Still everyone — but now the costly, individually revocable mode.
+	if !m2.everyoneSelected() {
+		t.Fatal("p should not change WHO is selected")
+	}
+	if !strings.Contains(m2.status, "per-recipient") {
+		t.Fatalf("status does not explain the mode: %q", m2.status)
+	}
+	if !strings.Contains(m2.View(), "per-recipient") {
+		t.Fatal("view does not show that per-recipient keys are in force")
+	}
+	if m3 := drive(m2, keyRunes("p")).(Model); m3.separate {
+		t.Fatal("p did not toggle back off")
+	}
+}
+
+func TestSendHonoursTheSeparateToggle(t *testing.T) {
+	m := newChatModel(t, "alice", "bob")
+	m.separate = true
+	m.input.SetValue("revocable later")
+	m2 := drive(m, tea.KeyMsg{Type: tea.KeyEnter}).(Model)
+
+	if m2.input.Value() != "" {
+		t.Fatalf("send did not go through: %q", m2.status)
+	}
+	// A separate send records per-recipient access keys; a group send
+	// records none.
+	owned, err := m2.env.St.Owned()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(owned) != 1 {
+		t.Fatalf("expected 1 owned object, got %d", len(owned))
+	}
+	for _, o := range owned {
+		if o.Mode != "separate" {
+			t.Fatalf("mode = %q, want separate (the p toggle was ignored)", o.Mode)
+		}
+	}
+}
+
+// Hidden messages are invisible in the history by design, so restoring one
+// must be an explicit choice rather than a guess.
+func TestUnhideOffersAPickerAndRestoresTheChosenMessage(t *testing.T) {
+	m := newChatModel(t, "alice", "bob")
+
+	var ids []string
+	for _, body := range []string{"first secret", "second secret"} {
+		res, err := m.env.Send(m.conv.Name, body, nil, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, res.ObjectID)
+		if err := m.env.Hide(m.conv.Name, res.ObjectID); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	m.focus = focusHistory
+	m2 := drive(m, keyRunes("u")).(Model)
+	if !m2.showHidden {
+		t.Fatalf("u did not open the hidden picker (status %q)", m2.status)
+	}
+	if len(m2.hidden) != 2 {
+		t.Fatalf("picker lists %d hidden messages, want 2", len(m2.hidden))
+	}
+	// The owner kept every layer key, so it can preview its own hidden
+	// messages even though nobody else can decrypt them.
+	view := m2.View()
+	for _, want := range []string{"first secret", "second secret"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("picker does not preview %q:\n%s", want, view)
+		}
+	}
+
+	// Restore the SECOND one specifically.
+	target := m2.hidden[1].ObjectID
+	m3 := drive(m2, tea.KeyMsg{Type: tea.KeyDown}, tea.KeyMsg{Type: tea.KeyEnter}).(Model)
+	if m3.showHidden {
+		t.Fatal("picker stayed open after restoring")
+	}
+	owned, err := m3.env.St.Owned()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if owned[target].Hidden {
+		t.Fatalf("chosen message %s is still hidden", short(target))
+	}
+	// And only that one.
+	other := ids[0]
+	if target == ids[0] {
+		other = ids[1]
+	}
+	if !owned[other].Hidden {
+		t.Fatalf("unhide also restored %s, which was not chosen", short(other))
+	}
+}
+
+func TestUnhideSaysSoWhenNothingIsHidden(t *testing.T) {
+	m := newChatModel(t, "alice", "bob")
+	m.focus = focusHistory
+	m2 := drive(m, keyRunes("u")).(Model)
+	if m2.showHidden {
+		t.Fatal("picker opened with nothing hidden")
+	}
+	if !strings.Contains(m2.status, "nothing hidden") {
+		t.Fatalf("status = %q", m2.status)
+	}
+}
+
+// Deleting for everyone is irreversible, so it must be confirmed rather
+// than fired on a single keypress.
+func TestDeleteRequiresConfirmation(t *testing.T) {
+	m := newChatModel(t, "alice", "bob")
+	res, err := m.env.Send(m.conv.Name, "delete me", nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m2 := drive(m, msgsLoadedFor(m, t)).(Model)
+	m2.focus = focusHistory
+
+	m3 := drive(m2, keyRunes("d")).(Model)
+	if m3.confirmWhat == nil {
+		t.Fatal("d did not ask for confirmation")
+	}
+	if !strings.Contains(m3.View(), "cannot be undone") {
+		t.Fatal("confirmation prompt does not warn that deletion is permanent")
+	}
+
+	// Anything other than y cancels, and the object survives.
+	cancelled := drive(m3, keyRunes("n")).(Model)
+	if cancelled.confirmWhat != nil {
+		t.Fatal("n left the confirmation pending")
+	}
+	owned, _ := cancelled.env.St.Owned()
+	if _, still := owned[res.ObjectID]; !still {
+		t.Fatal("cancelling the prompt deleted the object anyway")
+	}
+
+	// y goes through.
+	confirmed := drive(m3, keyRunes("y")).(Model)
+	owned, _ = confirmed.env.St.Owned()
+	if _, still := owned[res.ObjectID]; still {
+		t.Fatal("confirming did not delete the object")
+	}
+}
+
+func TestSoftRevokeIsReachableAndLabelledWeak(t *testing.T) {
+	// Four members so that {bob, carol} is a genuine subset — with only
+	// three, that IS everyone and the group key would be used instead.
+	m := newChatModel(t, "alice", "bob", "carol", "dave")
+	res, err := m.env.Send(m.conv.Name, "subset", []string{"bob", "carol"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Mode != "separate" {
+		t.Fatalf("setup: mode = %q, want separate", res.Mode)
+	}
+	m2 := drive(m, msgsLoadedFor(m, t)).(Model)
+	m2.focus = focusHistory
+	m2.recipIdx = 0 // bob
+
+	m3 := drive(m2, keyRunes("s")).(Model)
+	if m3.statusErr {
+		t.Fatalf("soft revoke failed: %q", m3.status)
+	}
+	if !strings.Contains(m3.status, "soft-revoked") {
+		t.Fatalf("status = %q", m3.status)
+	}
+	// The weakness must be stated, not buried.
+	if !strings.Contains(m3.notice, "weak") {
+		t.Fatalf("notice does not flag soft revoke as weak: %q", m3.notice)
+	}
+}
+
+// msgsLoadedFor synchronously loads the conversation's messages so a test
+// can select one in the history.
+func msgsLoadedFor(m Model, t *testing.T) tea.Msg {
+	t.Helper()
+	msgs, err := m.env.Messages(m.conv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return msgsLoaded{convID: m.conv.ID, msgs: msgs}
+}
+
 // End-to-end through the UI: two peers, a real shared folder, a subset
 // send. The excluded member must not be able to read it.
 func TestSubsetSendThroughUIExcludesNonRecipients(t *testing.T) {
