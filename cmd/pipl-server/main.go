@@ -139,10 +139,11 @@ func main() {
 	tlsCert := flag.String("tls-cert", "", "TLS certificate file (with -tls-key)")
 	tlsKey := flag.String("tls-key", "", "TLS private key file (with -tls-cert)")
 	tlsSelf := flag.Bool("tls-self-signed", false, "generate a self-signed TLS cert; clients pin its fingerprint")
+	tlsDir := flag.String("tls-dir", "", "with -tls-self-signed, cache the cert here so its fingerprint survives restarts")
 	fpFile := flag.String("tls-fingerprint-file", "", "write the cert fingerprint here (for clients to pin)")
 	flag.Parse()
 
-	tlsCfg, tlsNote, err := tlsConfig(*tlsCert, *tlsKey, *tlsSelf, *addr)
+	tlsCfg, tlsNote, err := tlsConfig(*tlsCert, *tlsKey, *tlsSelf, *tlsDir, *addr)
 	if err != nil {
 		log.Fatal(err)
 	}

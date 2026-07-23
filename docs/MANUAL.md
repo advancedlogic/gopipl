@@ -463,7 +463,7 @@ pipl unhide -conv N -object ID            restore
 
 ```
 pipl-server [-addr HOST:PORT] [-data FILE] [-blobs DIR]
-            [-tls-self-signed | -tls-cert FILE -tls-key FILE]
+            [-tls-self-signed [-tls-dir DIR] | -tls-cert FILE -tls-key FILE]
             [-tls-fingerprint-file FILE]
 ```
 
@@ -493,10 +493,16 @@ end-to-end encrypted before it reaches the server.) For anything beyond
 The easy way, no certificate authority needed:
 
 ```sh
-bin/pipl-server -tls-self-signed -tls-fingerprint-file ./server/pin.txt
-# logs:  TLS: self-signed (clients must pin this fingerprint)
-#        pin: ad324cfcbabfa456…
+bin/pipl-server -tls-self-signed -tls-dir ./server/tls \
+    -tls-fingerprint-file ./server/pin.txt
+# logs:  TLS: self-signed, generated, cached in ./server/tls
+#        clients must pin: ad324cfcbabfa456…
 ```
+
+`-tls-dir` caches the certificate so its fingerprint **survives restarts** —
+without it the cert is in-memory and regenerated on every start, so pinned
+clients would reject the server after a restart. Use `-tls-dir` for
+anything a peer pins; the ephemeral form is only for a throwaway run.
 
 Each peer then pins that fingerprint when it initialises, over `https://`:
 

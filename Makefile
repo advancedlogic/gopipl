@@ -68,9 +68,9 @@ run-server-mem: ## Run the server memory-only (no persistence)
 	$(GO) run ./cmd/pipl-server -addr $(ADDR)
 
 .PHONY: run-server-tls
-run-server-tls: ## Run the server with a self-signed TLS cert (pin written to ./server/pin.txt)
+run-server-tls: ## Run the server with a stable self-signed TLS cert (pin in ./server/pin.txt)
 	$(GO) run ./cmd/pipl-server -addr $(ADDR) -blobs $(BLOBS) -data $(DATA) \
-		-tls-self-signed -tls-fingerprint-file ./server/pin.txt
+		-tls-self-signed -tls-dir ./server/tls -tls-fingerprint-file ./server/pin.txt
 
 .PHONY: run
 run: ## Run the CLI/TUI as PEER (default ./peers/alice)
