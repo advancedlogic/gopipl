@@ -5,6 +5,7 @@
 # signing keys that ARE the revocation authority. Never commit these.
 # `pipl -home ./peers/alice` and friends land here.
 /peers/
+/server/
 .pipl/
 *.pipl-home/
 
