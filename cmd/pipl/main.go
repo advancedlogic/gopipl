@@ -105,6 +105,7 @@ func usage() {
               directories. Overrides $PIPL_HOME; default ~/.pipl.
 
   pipl init   -handle NAME [-server URL]        create identity
+              [-tls-pin FINGERPRINT]            pin a self-signed https server's cert
   pipl register                                 re-publish your identity (after a server reset)
   pipl unpin  -handle NAME                       forget a peer's pinned keys (after they re-created)
   pipl conv new  -name NAME -with H,H [-dir D]  start a conversation. With -dir it lives in a
@@ -189,11 +190,15 @@ func cmdInit(args []string) error {
 	fs := flag.NewFlagSet("init", flag.ExitOnError)
 	handle := fs.String("handle", "", "your handle (required)")
 	server := fs.String("server", "http://127.0.0.1:8737", "coordination server URL ('' for none)")
+	tlsPin := fs.String("tls-pin", "", "server TLS cert fingerprint to pin (for a self-signed https server)")
 	fs.Parse(args)
 	if *handle == "" {
 		return fmt.Errorf("-handle is required")
 	}
-	pub, err := chat.Init(*handle, *server)
+	if *tlsPin != "" && !strings.HasPrefix(*server, "https://") {
+		return fmt.Errorf("-tls-pin only applies to an https:// server")
+	}
+	pub, err := chat.InitWithPin(*handle, *server, *tlsPin)
 	if err != nil {
 		if pub.Handle == "" {
 			return err

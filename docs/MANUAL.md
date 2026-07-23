@@ -443,6 +443,7 @@ Every command takes `-home DIR`.
 pipl                                      interactive UI
 
 pipl init   -handle NAME [-server URL]    create your identity
+            [-tls-pin FINGERPRINT]        ...pin a self-signed https server
 
 pipl conv new  -name N -with H,H [-dir D] start a conversation
                                           (no -dir = relay + invite code)
@@ -462,6 +463,8 @@ pipl unhide -conv N -object ID            restore
 
 ```
 pipl-server [-addr HOST:PORT] [-data FILE] [-blobs DIR]
+            [-tls-self-signed | -tls-cert FILE -tls-key FILE]
+            [-tls-fingerprint-file FILE]
 ```
 
 Defaults to `127.0.0.1:8737`. `-data` persists the phonebook; `-blobs`
@@ -478,6 +481,46 @@ encrypted bytes a shared folder would hold, one directory per
 conversation, plus a small sidecar recording each object's public signing
 key so the server still knows who is allowed to rewrite it after a
 restart. Folder-backed conversations don't involve it at all.
+
+### Transport encryption (TLS)
+
+By default the server speaks plain HTTP, which is fine on loopback but
+exposes **metadata** — who talks to whom, and blob sizes and timing — to
+anyone on the network path. (It never exposes message *content*: that is
+end-to-end encrypted before it reaches the server.) For anything beyond
+`127.0.0.1`, turn on TLS.
+
+The easy way, no certificate authority needed:
+
+```sh
+bin/pipl-server -tls-self-signed -tls-fingerprint-file ./server/pin.txt
+# logs:  TLS: self-signed (clients must pin this fingerprint)
+#        pin: ad324cfcbabfa456…
+```
+
+Each peer then pins that fingerprint when it initialises, over `https://`:
+
+```sh
+bin/pipl -home ./peers/alice init -handle alice \
+    -server https://SERVER:8737 -tls-pin ad324cfcbabfa456…
+```
+
+The pin works exactly like a peer fingerprint: the client trusts **only**
+that certificate, so no CA is involved and a swapped or man-in-the-middle
+certificate is rejected. Verify the fingerprint out of band, the same way
+you verify a peer's.
+
+If the server has a real hostname and a CA-issued certificate (e.g. from
+Let's Encrypt), use it directly and skip the pin — the client trusts the
+system roots:
+
+```sh
+bin/pipl-server -tls-cert fullchain.pem -tls-key privkey.pem
+bin/pipl -home ./peers/alice init -handle alice -server https://chat.example.com
+```
+
+The desktop app carries the pin through the same setup field, since every
+front end reads the one server URL and pin from config.
 
 ---
 
@@ -499,7 +542,9 @@ restart. Folder-backed conversations don't involve it at all.
 - **Anything already read.** Copies exist. Revocation cannot recall them.
 - **Who is talking to whom, and when.** The server and the storage
   provider see handles, timing, sizes, and message counts. Message
-  *length* leaks too — padding isn't implemented yet.
+  *length* leaks too — padding isn't implemented yet. TLS (above) hides
+  this from a *network* observer between you and the server, but not from
+  the server itself.
 - **Availability.** A relay server can refuse to serve or delete blobs
   (it cannot read or alter them). Folder conversations don't depend on it.
 - **A recipient choosing to leak.** Anyone you send to can copy and

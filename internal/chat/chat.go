@@ -48,7 +48,7 @@ func Load() (*Env, error) {
 	}
 	e := &Env{St: st, ID: id, Cfg: cfg}
 	if cfg.Server != "" {
-		e.Cl = api.New(cfg.Server)
+		e.Cl = api.New(cfg.Server, cfg.ServerCertPin)
 	}
 	return e, nil
 }
@@ -175,6 +175,14 @@ func (e *Env) Notify(convID string) {
 // Init creates and persists a new identity, registering it with the
 // directory so peers can find it. Returns the public identity.
 func Init(handle, server string) (identity.PublicIdentity, error) {
+	return InitWithPin(handle, server, "")
+}
+
+// InitWithPin is Init plus a TLS certificate pin (hex SHA-256) for an
+// https:// server. The pin is stored in config and used for every later
+// connection, so a self-signed server is trusted on first use exactly the
+// way peer identities are.
+func InitWithPin(handle, server, certPin string) (identity.PublicIdentity, error) {
 	st, err := state.Open()
 	if err != nil {
 		return identity.PublicIdentity{}, err
@@ -189,12 +197,12 @@ func Init(handle, server string) (identity.PublicIdentity, error) {
 	if err := id.Save(st.IdentityPath()); err != nil {
 		return identity.PublicIdentity{}, err
 	}
-	if err := st.SaveConfig(state.Config{Server: server}); err != nil {
+	if err := st.SaveConfig(state.Config{Server: server, ServerCertPin: certPin}); err != nil {
 		return identity.PublicIdentity{}, err
 	}
 	pub := id.Public()
 	if server != "" {
-		if err := api.New(server).Register(pub); err != nil {
+		if err := api.New(server, certPin).Register(pub); err != nil {
 			return pub, fmt.Errorf("identity created, but registration failed: %w", err)
 		}
 	}

@@ -15,6 +15,11 @@ import (
 
 type Config struct {
 	Server string `json:"server,omitempty"`
+	// ServerCertPin, when set, is the hex SHA-256 of the server's TLS
+	// certificate. The client trusts only that certificate — TOFU for the
+	// transport, so a self-signed server needs no CA. Empty means system
+	// roots (a CA-issued cert) or plain HTTP.
+	ServerCertPin string `json:"server_cert_pin,omitempty"`
 }
 
 type Conversation struct {

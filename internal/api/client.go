@@ -8,6 +8,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -23,12 +25,41 @@ import (
 type Client struct {
 	Base string
 	http *http.Client
+	// tr is the transport shared by pooled requests and the long-lived SSE
+	// stream, so a pinned certificate is honored on both.
+	tr *http.Transport
 }
 
-func New(base string) *Client {
+// New builds a client for base. If base is https:// and pinSHA256 is a
+// non-empty hex SHA-256 of the server certificate, the client trusts ONLY
+// that certificate — the TOFU model applied to transport, so a self-signed
+// server needs no CA and a swapped certificate is rejected. An empty pin
+// uses the system roots (for a server with a CA-issued cert).
+func New(base, pinSHA256 string) *Client {
+	tr := &http.Transport{}
+	if pin := strings.ToLower(strings.ReplaceAll(pinSHA256, ":", "")); pin != "" {
+		tr.TLSClientConfig = &tls.Config{
+			// We verify the pin ourselves against the leaf cert, so skip
+			// the default chain check — the pin is strictly stronger for a
+			// self-signed server than any CA path would be.
+			InsecureSkipVerify: true,
+			VerifyConnection: func(cs tls.ConnectionState) error {
+				if len(cs.PeerCertificates) == 0 {
+					return fmt.Errorf("server presented no certificate")
+				}
+				sum := sha256.Sum256(cs.PeerCertificates[0].Raw)
+				if got := hex.EncodeToString(sum[:]); got != pin {
+					return fmt.Errorf("server certificate fingerprint mismatch: "+
+						"pinned %s, got %s (wrong server, or its cert changed)", pin, got)
+				}
+				return nil
+			},
+		}
+	}
 	return &Client{
 		Base: strings.TrimRight(base, "/"),
-		http: &http.Client{Timeout: 10 * time.Second},
+		tr:   tr,
+		http: &http.Client{Timeout: 10 * time.Second, Transport: tr},
 	}
 }
 
@@ -200,7 +231,7 @@ func (c *Client) Events(ctx context.Context, convID string, onEvent func()) erro
 	if err != nil {
 		return err
 	}
-	stream := &http.Client{} // no timeout: long-lived stream
+	stream := &http.Client{Transport: c.tr} // no timeout: long-lived stream, same pinning
 	resp, err := stream.Do(req)
 	if err != nil {
 		return err

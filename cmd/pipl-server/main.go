@@ -136,7 +136,16 @@ func main() {
 	addr := flag.String("addr", "127.0.0.1:8737", "listen address")
 	dataFile := flag.String("data", "", "optional file to persist the identity directory")
 	blobDir := flag.String("blobs", "", "optional directory to persist relayed blobs (ciphertext); memory-only if unset")
+	tlsCert := flag.String("tls-cert", "", "TLS certificate file (with -tls-key)")
+	tlsKey := flag.String("tls-key", "", "TLS private key file (with -tls-cert)")
+	tlsSelf := flag.Bool("tls-self-signed", false, "generate a self-signed TLS cert; clients pin its fingerprint")
+	fpFile := flag.String("tls-fingerprint-file", "", "write the cert fingerprint here (for clients to pin)")
 	flag.Parse()
+
+	tlsCfg, tlsNote, err := tlsConfig(*tlsCert, *tlsKey, *tlsSelf, *addr)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	dir, err := newDirectory(*dataFile)
 	if err != nil {
@@ -322,7 +331,22 @@ func main() {
 	} else {
 		log.Printf("  relay storage: %s", *blobDir)
 	}
-	log.Fatal(http.ListenAndServe(*addr, mux))
+	log.Printf("  %s", tlsNote)
+
+	srv := &http.Server{Addr: *addr, Handler: mux, TLSConfig: tlsCfg}
+	if tlsCfg == nil {
+		log.Fatal(srv.ListenAndServe())
+	}
+	// Persist the fingerprint if asked, so a local client can pin without
+	// copying it out of the logs.
+	if fp := certFingerprint(tlsCfg.Certificates[0].Certificate[0]); *fpFile != "" {
+		if err := writeFingerprintFile(*fpFile, fp); err != nil {
+			log.Fatalf("writing fingerprint file: %v", err)
+		}
+		log.Printf("  fingerprint written to %s", *fpFile)
+	}
+	// Cert and key already live in TLSConfig.Certificates, so pass "".
+	log.Fatal(srv.ListenAndServeTLS("", ""))
 }
 
 // maxBlob bounds a single upload. Generous for text, and a backstop
