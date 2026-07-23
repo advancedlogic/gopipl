@@ -122,14 +122,38 @@ func (m Model) viewConversations() string {
 	if len(m.convs) == 0 {
 		b.WriteString(styMuted.Render("no conversations yet\n\npress n to create one, J to join one by folder\n"))
 	} else {
+		// Width the name column so the activity lines up and the eye can
+		// scan it — the whole point is spotting which one is live.
+		nameW := 4
+		for _, c := range m.convs {
+			if len(c.Name) > nameW {
+				nameW = len(c.Name)
+			}
+		}
 		for i, c := range m.convs {
-			line := fmt.Sprintf("%s  %s", c.Name, styMuted.Render("("+strings.Join(c.Members, ", ")+")"))
+			s, known := m.summaries[c.ID]
+			line := fmt.Sprintf("%-*s  %s", nameW, c.Name,
+				styMuted.Render("("+strings.Join(c.Members, ", ")+")"))
+			switch {
+			case !known:
+				// Activity has not loaded yet; say nothing rather than
+				// imply the conversation is empty.
+			case s.Err != nil:
+				line += "  " + styErr.Render("unreachable")
+			case s.Count == 0:
+				line += "  " + styMuted.Render("no messages")
+			default:
+				line += fmt.Sprintf("  %s", styOK.Render(fmt.Sprintf("%d msg", s.Count)))
+				line += styMuted.Render(fmt.Sprintf("  last %s from %s",
+					s.Last.Local().Format("15:04"), s.LastFrom))
+			}
 			if i == m.convIdx {
 				b.WriteString(stySelected.Render("› "+line) + "\n")
 			} else {
 				b.WriteString("  " + line + "\n")
 			}
 		}
+		b.WriteString("\n" + styMuted.Render("most recent first"))
 	}
 	b.WriteString(m.footer("↑/↓=select  enter=open  n=new  J=join  q=quit"))
 	return b.String()
@@ -230,8 +254,17 @@ func (m *Model) renderHistory() {
 }
 
 func (m Model) viewChat() string {
+	// The conversation ID is shown because the local name is per-peer: two
+	// windows can display the same name and be different conversations, or
+	// different names and be the same one. The ID is the thing that must
+	// match between peers.
+	where := "relay"
+	if m.conv.Dir != "" {
+		where = "folder"
+	}
 	title := styTitle.Render("# "+m.conv.Name) + "  " +
-		styMuted.Render(strings.Join(m.conv.Members, ", "))
+		styMuted.Render(strings.Join(m.conv.Members, ", ")) + "  " +
+		styMuted.Render(fmt.Sprintf("[%s %s]", where, short(m.conv.ID)))
 
 	// Recipients panel.
 	var rb strings.Builder

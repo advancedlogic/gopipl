@@ -47,6 +47,10 @@ type Model struct {
 	convs     []state.Conversation
 	convIdx   int
 	activeIdx int // -1 when no conversation is open
+	// summaries carries per-conversation activity, keyed by conversation
+	// ID. Loaded asynchronously: reading a relay conversation is a network
+	// call, and the list must not block on it.
+	summaries map[string]chat.Summary
 
 	// chat screen
 	conv       state.Conversation
@@ -155,6 +159,22 @@ type msgsLoaded struct {
 // poll tick noticed something may have changed.
 type folderChanged struct{ convID string }
 
+// summariesLoaded carries per-conversation activity for the list.
+type summariesLoaded struct {
+	summaries []chat.Summary
+	err       error
+}
+
+// loadSummaries reads activity for every conversation off the update
+// loop, so a slow or unreachable relay cannot freeze the UI.
+func (m Model) loadSummaries() tea.Cmd {
+	env := m.env
+	return func() tea.Msg {
+		s, err := env.Summaries()
+		return summariesLoaded{summaries: s, err: err}
+	}
+}
+
 type statusMsg struct {
 	text  string
 	isErr bool
@@ -162,7 +182,14 @@ type statusMsg struct {
 
 type tickMsg time.Time
 
-func (m Model) Init() tea.Cmd { return textinput.Blink }
+// Init starts the cursor blink and, when opening straight onto the
+// conversation list, the activity load plus the tick that keeps it fresh.
+func (m Model) Init() tea.Cmd {
+	if m.screen == screenConversations {
+		return tea.Batch(textinput.Blink, m.loadSummaries(), pollTick())
+	}
+	return textinput.Blink
+}
 
 // loadMessages re-runs the whole read path for the open conversation.
 func (m Model) loadMessages() tea.Cmd {

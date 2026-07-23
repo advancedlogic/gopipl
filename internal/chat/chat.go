@@ -83,6 +83,50 @@ func (e *Env) Conversations() ([]state.Conversation, error) {
 	return out, nil
 }
 
+// Summary is a conversation plus enough activity to tell it apart from
+// another one in a list. Two conversations with the same members look
+// identical without this — which is exactly how you end up typing into a
+// window nobody else is reading.
+type Summary struct {
+	Conversation state.Conversation
+	Count        int
+	Last         time.Time
+	LastFrom     string
+	// Err is set when this conversation could not be read (an unreachable
+	// relay, say). Reported rather than swallowed so the list can say so
+	// instead of silently showing zero messages.
+	Err error
+}
+
+// Summaries describes every conversation, newest activity first, so the
+// one being used is at the top.
+func (e *Env) Summaries() ([]Summary, error) {
+	convs, err := e.Conversations()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Summary, 0, len(convs))
+	for _, c := range convs {
+		s := Summary{Conversation: c}
+		msgs, err := e.Messages(c)
+		if err != nil {
+			s.Err = err
+		} else if len(msgs) > 0 {
+			s.Count = len(msgs)
+			last := msgs[len(msgs)-1]
+			s.Last, s.LastFrom = last.SentAt, last.From
+		}
+		out = append(out, s)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Last.Equal(out[j].Last) {
+			return out[i].Conversation.Name < out[j].Conversation.Name
+		}
+		return out[i].Last.After(out[j].Last)
+	})
+	return out, nil
+}
+
 // MemberIdentity resolves a handle to a public identity: self, a locally
 // pinned peer, or (first contact) a server lookup that gets pinned TOFU.
 // onPin, if set, is told about first-contact pins so a UI can surface the

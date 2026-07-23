@@ -37,6 +37,35 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.renderHistory()
 		return m, nil
 
+	case summariesLoaded:
+		if msg.err != nil {
+			m.setError(msg.err)
+			return m, nil
+		}
+		if m.summaries == nil {
+			m.summaries = map[string]chat.Summary{}
+		}
+		// Reorder the list to match: most recent activity first, so the
+		// conversation being used is the one under the cursor.
+		keep := ""
+		if m.convIdx < len(m.convs) {
+			keep = m.convs[m.convIdx].ID
+		}
+		m.convs = m.convs[:0]
+		for _, s := range msg.summaries {
+			m.summaries[s.Conversation.ID] = s
+			m.convs = append(m.convs, s.Conversation)
+		}
+		for i, c := range m.convs {
+			if c.ID == keep {
+				m.convIdx = i
+			}
+		}
+		if m.convIdx >= len(m.convs) {
+			m.convIdx = max(0, len(m.convs)-1)
+		}
+		return m, nil
+
 	case folderChanged:
 		var cmds []tea.Cmd
 		cmds = append(cmds, waitForPush) // keep listening
@@ -46,6 +75,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case tickMsg:
+		// The conversation list refreshes too, so activity elsewhere shows
+		// up without having to open each conversation to find it.
+		if m.screen == screenConversations {
+			return m, tea.Batch(pollTick(), m.loadSummaries())
+		}
 		if m.screen != screenChat {
 			return m, nil
 		}
@@ -439,7 +473,7 @@ func (m Model) keyChat(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if err := m.reloadConvs(); err != nil {
 			m.setError(err)
 		}
-		return m, nil
+		return m, tea.Batch(m.loadSummaries(), pollTick())
 
 	case tea.KeyTab:
 		// input -> recipients -> history -> input

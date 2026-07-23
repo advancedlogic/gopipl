@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -240,6 +241,76 @@ func TestChatViewShowsRecipientsAndAudienceModel(t *testing.T) {
 	}
 	if !strings.Contains(view2, "[x] bob") {
 		t.Fatalf("included recipient not shown as checked:\n%s", view2)
+	}
+}
+
+// Two conversations with the same members are indistinguishable in a bare
+// list, which is how you end up typing into one nobody else is reading.
+// The list must show activity, and put the busiest first.
+
+func TestConversationListShowsActivity(t *testing.T) {
+	m := newChatModel(t, "alice", "bob")
+	// A second conversation with the SAME members, deliberately.
+	if _, err := m.env.NewConversation("quiet", m.env.St.Home+string(os.PathSeparator)+"shared2",
+		[]string{"bob"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.env.Send("team", "over here", nil, false); err != nil {
+		t.Fatal(err)
+	}
+
+	m.screen = screenConversations
+	if err := m.reloadConvs(); err != nil {
+		t.Fatal(err)
+	}
+	sums, err := m.env.Summaries()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := drive(m, summariesLoaded{summaries: sums}).(Model)
+
+	view := got.View()
+	if !strings.Contains(view, "1 msg") {
+		t.Fatalf("list does not show the message count:\n%s", view)
+	}
+	if !strings.Contains(view, "no messages") {
+		t.Fatalf("list does not mark the empty conversation:\n%s", view)
+	}
+	// The one with traffic must sort first, so the cursor starts on it.
+	if got.convs[0].Name != "team" {
+		t.Fatalf("conversation order = %v, want the active one first",
+			[]string{got.convs[0].Name, got.convs[1].Name})
+	}
+}
+
+func TestConversationListReportsUnreachable(t *testing.T) {
+	m := newChatModel(t, "alice", "bob")
+	m.screen = screenConversations
+	if err := m.reloadConvs(); err != nil {
+		t.Fatal(err)
+	}
+	got := drive(m, summariesLoaded{summaries: []chat.Summary{{
+		Conversation: m.conv,
+		Err:          errors.New("relay down"),
+	}}}).(Model)
+
+	if !strings.Contains(got.View(), "unreachable") {
+		t.Fatalf("a conversation that cannot be read is not flagged:\n%s", got.View())
+	}
+}
+
+// The local name is per-peer, so it cannot confirm two windows are in the
+// same conversation. The ID can.
+func TestChatHeaderShowsConversationIdentity(t *testing.T) {
+	m := newChatModel(t, "alice", "bob")
+	view := m.View()
+
+	if !strings.Contains(view, short(m.conv.ID)) {
+		t.Fatalf("header omits the conversation id:\n%s", view)
+	}
+	// And where it lives, since that decides whether a server is needed.
+	if !strings.Contains(view, "folder") {
+		t.Fatalf("header does not say the conversation is folder-backed:\n%s", view)
 	}
 }
 
