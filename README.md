@@ -1,14 +1,21 @@
-# PIPL Chat — v0.1 prototype
+# PIPL Chat — v0.4 prototype
 
-Peer-to-peer chat where **every message is an encrypted, signed file** in a
-shared folder (local filesystem now; a folder inside Dropbox/Drive already
-works, since the backend is just files). The sender keeps per-object private
-keys and can **revoke or hide** any message at any time. The server holds
-**no keys, no content** — only a public-identity directory and "something
-changed" pings.
+Peer-to-peer chat where **every message is an encrypted, signed file**. It
+lives either in a folder both peers can reach (a Dropbox/Drive folder works
+as-is — the backend is just files) or on a server that stores ciphertext it
+cannot decrypt. The sender keeps per-object private keys and can **revoke or
+hide** any message at any time. The server holds **no keys and no
+plaintext** — a public-identity directory, "something changed" pings, and
+optionally the encrypted blobs themselves.
 
-Zero dependencies: Go standard library only. See the design doc + amendments
-in the PIPL project.
+**New here? Read the [user manual](docs/MANUAL.md).** This README is the
+short tour; the manual covers each task, the keybindings, and what the
+guarantees actually are. See [design.md](docs/design.md) for the
+architecture and threat model, [STATUS.md](docs/STATUS.md) for what is and
+isn't finished.
+
+All cryptography is Go standard library. The only external dependencies are
+the terminal-UI libraries, and none of them touch key material.
 
 ## Layout
 
@@ -192,8 +199,10 @@ send that happens to go to everyone.
   may remain fetchable by a revoked peer who kept their old access key —
   hard revoke is best-effort there. Owner-controlled storage (plain disk,
   S3 without versioning) gives full-strength revocation.
-- Slot count leaks audience size; member handles are visible in
-  `pipl-conv.json` (metadata leaks, v0.1 — padding/dummy slots later).
+- Slot count leaks audience size, and message length leaks (no padding
+  yet). Folder conversations also expose member handles in
+  `pipl-conv.json`; relay conversations carry the roster in the invite
+  code instead. Dummy slots and padding would close these.
 - Identity lookup is trust-on-first-use; verify fingerprints out of band.
 - Wrap layers accumulate one per revocation; a future `compact` op can
   flatten long chains.
@@ -214,6 +223,7 @@ external modules, and none of them touch key material.
 
 ## Next (per design doc roadmap)
 
-`conv rekey` (group key rotation = per-member revocation for group sends) ·
-grant relay on the server for peers with no shared folder · Dropbox/S3
-backends, Lambda deployment · multi-device identity.
+`conv rekey` (group key rotation = per-member revocation for whole-roster
+sends) · relay persistence (blobs are in-memory, so a server restart loses
+them) · Dropbox/S3 backends, Lambda deployment · payload padding ·
+multi-device identity.
