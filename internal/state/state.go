@@ -134,6 +134,26 @@ func (s *State) PinPeer(p identity.PublicIdentity) error {
 	return writeJSON(filepath.Join(s.Home, "peers.json"), peers)
 }
 
+// UnpinPeer forgets a pinned identity so the next contact re-pins from the
+// server. Returns the dropped identity so a caller can show which
+// fingerprint is being discarded — deliberately removing trust is exactly
+// when the fingerprint matters. ok is false if the handle was not pinned.
+func (s *State) UnpinPeer(handle string) (dropped identity.PublicIdentity, ok bool, err error) {
+	peers, err := s.Peers()
+	if err != nil {
+		return identity.PublicIdentity{}, false, err
+	}
+	p, ok := peers[handle]
+	if !ok {
+		return identity.PublicIdentity{}, false, nil
+	}
+	delete(peers, handle)
+	if err := writeJSON(filepath.Join(s.Home, "peers.json"), peers); err != nil {
+		return identity.PublicIdentity{}, false, err
+	}
+	return p, true, nil
+}
+
 func readJSON[T any](path string, def T) (T, error) {
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {

@@ -208,11 +208,41 @@ func Init(handle, server string) (identity.PublicIdentity, error) {
 // in-memory directory is wiped. Init refuses to run once an identity
 // exists, so without this there was no way back: the peer stayed
 // unresolvable (404) and no one could create a conversation including it.
+//
+// A 409 from the server means the handle is already held by DIFFERENT
+// keys — you re-created an identity under a name someone (often a previous
+// you) already claimed. The server refuses to reassign a handle on
+// purpose: that is what stops it handing out attacker keys for a known
+// name. The only clean recovery is a fresh handle; this returns a clear
+// error rather than a bare "409 Conflict".
 func (e *Env) Register() error {
 	if e.Cl == nil {
 		return fmt.Errorf("no server configured (run with a server to be findable)")
 	}
-	return e.Cl.Register(e.ID.Public())
+	err := e.Cl.Register(e.ID.Public())
+	if err != nil && strings.Contains(err.Error(), "409") {
+		return fmt.Errorf(
+			"the server already holds a different identity for the handle %q (fingerprint conflict): "+
+				"a handle cannot be reassigned — that is what prevents key substitution. "+
+				"If you re-created this identity, use a new handle. If the server's directory is simply stale "+
+				"(restarted without -data), it must be cleared server-side", e.ID.Handle)
+	}
+	return err
+}
+
+// Unpin forgets a pinned peer so the next lookup re-pins the current
+// identity from the server. This is the recovery for a stale pin: after a
+// peer is re-created its keys change, and TOFU refuses the new ones until
+// the old entry is dropped. Returns the fingerprint that was discarded.
+func (e *Env) Unpin(handle string) (fingerprint string, ok bool, err error) {
+	if handle == e.ID.Handle {
+		return "", false, fmt.Errorf("cannot unpin yourself")
+	}
+	dropped, ok, err := e.St.UnpinPeer(handle)
+	if err != nil || !ok {
+		return "", ok, err
+	}
+	return dropped.Fingerprint(), true, nil
 }
 
 // HasIdentity reports whether this PIPL_HOME already holds an identity.

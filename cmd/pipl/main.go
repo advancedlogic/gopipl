@@ -55,6 +55,8 @@ func main() {
 		err = cmdInit(args[1:])
 	case "register":
 		err = cmdRegister(args[1:])
+	case "unpin":
+		err = cmdUnpin(args[1:])
 	case "conv":
 		if len(args) < 2 {
 			usage()
@@ -104,6 +106,7 @@ func usage() {
 
   pipl init   -handle NAME [-server URL]        create identity
   pipl register                                 re-publish your identity (after a server reset)
+  pipl unpin  -handle NAME                       forget a peer's pinned keys (after they re-created)
   pipl conv new  -name NAME -with H,H [-dir D]  start a conversation. With -dir it lives in a
                                                 shared folder; without, it relays through the
                                                 server (no folder needed) and prints an invite.
@@ -222,6 +225,33 @@ func cmdRegister(args []string) error {
 	}
 	pub := e.ID.Public()
 	fmt.Printf("re-registered %s (fingerprint %s) with %s\n", pub.Handle, pub.Fingerprint(), e.Cfg.Server)
+	return nil
+}
+
+// cmdUnpin forgets a pinned peer so the next contact re-pins their current
+// identity from the server. The recovery when a peer was re-created and
+// TOFU refuses their changed keys.
+func cmdUnpin(args []string) error {
+	fs := flag.NewFlagSet("unpin", flag.ExitOnError)
+	handle := fs.String("handle", "", "peer handle to forget (required)")
+	fs.Parse(args)
+	if *handle == "" {
+		return fmt.Errorf("-handle is required")
+	}
+	e, err := chat.Load()
+	if err != nil {
+		return err
+	}
+	fp, ok, err := e.Unpin(*handle)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		fmt.Printf("%q was not pinned — nothing to do\n", *handle)
+		return nil
+	}
+	fmt.Printf("forgot %s (was fingerprint %s) — next contact will re-pin from the server\n", *handle, fp)
+	fmt.Println("note: verify their new fingerprint out of band before trusting it.")
 	return nil
 }
 
