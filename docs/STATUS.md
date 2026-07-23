@@ -1,6 +1,28 @@
 # PIPL prototype — status (2026-07-23)
 
-## v0.3 (current)
+## v0.4 (current)
+
+**Blob relay: conversations without a shared folder.** `conv new` with no
+`-dir` relays through the server; peers join with an invite code and need
+nothing else in common. Verified end to end by `demo-relay.sh`.
+
+- The server stores ciphertext it cannot decrypt, and authorizes writes
+  by verifying each object's Ed25519 signature: the first write of an
+  object ID pins its signing key, later writes must match it. So only an
+  owner can rewrite or delete an object — revoke, hide and unhide all
+  work over the network. Deletion uses a domain-separated signed
+  challenge, so signatures cannot be replayed across objects.
+- `internal/chat` now writes through a `backend` interface with two
+  implementations (shared folder, relay). All send/receive/revoke logic
+  is shared; the transport choice changes nothing about what is
+  encrypted or who can read it.
+- Invite codes (`pipl1:...`) carry the roster, never a key.
+
+This departs from design §7's "no durable content" rule — see amendment
+A5 for why (a blob deleted on delivery could never be revoked) and for
+the threat-model consequences.
+
+## v0.3
 
 Interactive Bubble Tea front end, plus per-message recipient selection.
 
@@ -69,6 +91,12 @@ CLI: `init` / `conv new` / `conv join` / `send [-separate]` /
 - `conv rekey` is still missing, so revoking one member of a
   whole-roster send is not possible — the UI says so and points at
   hide or a subset send.
+- Relay blobs are held in memory: restarting the server loses every
+  relayed conversation. Persistence is the next relay task.
+- Relay grant deletion (soft revoke) is authorized only by knowing the
+  random blob ID, because a sealed grant carries no signature the server
+  can check. Same exposure as a listable shared folder, and soft revoke
+  is the documented weak tier either way.
 
 ## Next steps (in rough priority order)
 

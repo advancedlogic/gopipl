@@ -71,6 +71,10 @@ type Model struct {
 	status    string
 	statusErr bool
 	notice    string // sticky honest-limitation notice
+	// invite is the code for the open conversation, shown on demand (i).
+	// For a relay-backed conversation it is the only way others can join.
+	invite     string
+	showInvite bool
 
 	// live refresh
 	cancelFollow context.CancelFunc

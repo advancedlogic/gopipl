@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/antonio/pipl/internal/chat"
+	"github.com/antonio/pipl/internal/state"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -170,24 +171,24 @@ func (m Model) keyConversations(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.screen = screenNewConv
 		m.form = []textinput.Model{
 			newInput("conversation name (local label)", 40),
-			newInput("shared folder path", 256),
+			newInput("shared folder — leave empty to use the server relay", 256),
 		}
 		m.formIdx = 0
 		m.form[0].Focus()
 		m.picked = map[string]bool{}
 		m.pickIdx = 0
 		m.loadDirectory()
-		m.setStatus("name and folder, then tab to pick members")
+		m.setStatus("name it, then tab to pick members (folder optional)")
 		return m, nil
 	case "J":
 		m.screen = screenJoinConv
 		m.form = []textinput.Model{
 			newInput("conversation name (local label)", 40),
-			newInput("shared folder path", 256),
+			newInput("invite code (pipl1:...) — or a shared folder path", 4096),
 		}
 		m.formIdx = 0
 		m.form[0].Focus()
-		m.setStatus("point at the folder a peer created")
+		m.setStatus("paste the invite code a peer sent you")
 		return m, nil
 	case "enter":
 		if len(m.convs) == 0 {
@@ -308,8 +309,12 @@ func (m Model) keyNewConv(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) createConversation() (tea.Model, tea.Cmd) {
 	name := strings.TrimSpace(m.form[0].Value())
 	dir := strings.TrimSpace(m.form[1].Value())
-	if name == "" || dir == "" {
-		m.setStatus("name and folder are both required")
+	if name == "" {
+		m.setStatus("a name is required")
+		return m, nil
+	}
+	if dir == "" && m.env.Cl == nil {
+		m.setStatus("no server configured, so a shared folder is required")
 		return m, nil
 	}
 	var with []string
@@ -332,6 +337,12 @@ func (m Model) createConversation() (tea.Model, tea.Cmd) {
 	if err := m.reloadConvs(); err != nil {
 		m.setError(err)
 		return m, nil
+	}
+	// Surface the invite immediately: for a relay conversation it is the
+	// ONLY way the others can join, so burying it would strand them.
+	if code, err := m.env.Invite(conv.Name); err == nil {
+		m.invite = code
+		m.notice = "send this invite to the others — press i to see it again"
 	}
 	for i, c := range m.convs {
 		if c.ID == conv.ID {
@@ -358,12 +369,19 @@ func (m Model) keyJoinConv(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tea.KeyEnter:
 		name := strings.TrimSpace(m.form[0].Value())
-		dir := strings.TrimSpace(m.form[1].Value())
-		if name == "" || dir == "" {
-			m.setStatus("name and folder are both required")
+		where := strings.TrimSpace(m.form[1].Value())
+		if name == "" || where == "" {
+			m.setStatus("a name and either an invite code or a folder are required")
 			return m, nil
 		}
-		conv, err := m.env.JoinConversation(name, dir, m.onPin)
+		// An invite code is self-identifying, so no mode switch is needed.
+		var conv state.Conversation
+		var err error
+		if strings.HasPrefix(where, "pipl1:") {
+			conv, err = m.env.JoinInvite(name, where, m.onPin)
+		} else {
+			conv, err = m.env.JoinConversation(name, where, m.onPin)
+		}
 		if err != nil {
 			m.setError(err)
 			return m, nil
@@ -390,6 +408,10 @@ func (m Model) keyJoinConv(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) keyChat(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyEsc:
+		if m.showInvite { // esc closes the invite overlay first
+			m.showInvite = false
+			return m, nil
+		}
 		if m.cancelFollow != nil {
 			m.cancelFollow()
 			m.cancelFollow = nil
@@ -450,6 +472,8 @@ func (m Model) keyRecipients(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "a":
 		m.selectAll()
 		m.describeAudience()
+	case "i":
+		return m.toggleInvite()
 	}
 	return m, nil
 }
@@ -487,7 +511,27 @@ func (m Model) keyHistory(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.unhideSelected()
 	case "r":
 		return m.revokeSelected()
+	case "i":
+		return m.toggleInvite()
 	}
+	return m, nil
+}
+
+// toggleInvite shows the code others need to join this conversation.
+// Bound outside the message input, where "i" is just a letter.
+func (m Model) toggleInvite() (tea.Model, tea.Cmd) {
+	if m.showInvite {
+		m.showInvite = false
+		return m, nil
+	}
+	code, err := m.env.Invite(m.conv.Name)
+	if err != nil {
+		m.setError(err)
+		return m, nil
+	}
+	m.invite = code
+	m.showInvite = true
+	m.setStatus("invite code — copy it to whoever should join (esc or i to close)")
 	return m, nil
 }
 

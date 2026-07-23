@@ -230,7 +230,7 @@ Backends: local filesystem (fsnotify for Watch), Dropbox API, Google Drive API, 
 | Adversary | Sees | Can do | Defense |
 |---|---|---|---|
 | Storage provider | Ciphertext, random names, sizes, timing | Withhold/reorder/restore old versions | Encryption, padding, hash chain detects tampering; history caveat §6 |
-| Server operator | Identity fingerprints, traffic timing | Deny service, present wrong identity keys | Keyless design; TOFU + fingerprint verification; server optional |
+| Server operator | Identity fingerprints, traffic timing — **and, for relay-backed conversations, the ciphertext itself** (A5) | Deny service, present wrong identity keys, withhold or delete relayed blobs; **cannot** read, forge or alter one | Keyless design; TOFU + fingerprint verification; per-object signature checks on every relay write; server optional for folder-backed conversations |
 | Revoked recipient | Old plaintext they already saw | Keep copies; mine provider history | Honest UI; rotation; owner-controlled history where possible |
 | Network observer | TLS traffic to storage/server | Traffic analysis | Standard TLS; padding; (onion routing out of scope v1) |
 | Malicious recipient | Everything shared with them | Re-share content | Out of scope — unsolvable by cryptography |
@@ -322,6 +322,50 @@ standard-library-only dependencies; the constraint was an artifact of the
 sandbox the prototype was written in, and no external module touches key
 material.
 
+**A5 — The relay is durable, not store-and-forward (2026-07-23).** §7
+specifies the sealed-blob relay as a *transient* mailbox, "deleted on
+delivery or TTL", preserving the rule that the server holds no durable
+content. Building it revealed that this is incompatible with the project's
+central feature: **revocation works by rewriting a stored object**, so a
+blob deleted on delivery can never be revoked, hidden, or unhidden. It
+would also mean no scrollback and no second device. The relay is therefore
+durable — the server stores ciphertext until the owner deletes it.
+
+The keyless invariant is untouched: the server holds no key, no plaintext
+and no capability, and cannot decrypt anything it stores. What it gains is
+an authorization duty, discharged without any secret:
+
+- The first write of an object ID records the Ed25519 signing key from
+  that object's own signed header.
+- Every later write must verify under the *same* key. Only the owner holds
+  the private half, so only the owner can rewrite an object — the network
+  equivalent of the filesystem's write permission.
+- Deletion requires a signature over a domain-separated challenge
+  (`pipl/relay/delete/v1:<object-id>`), so a signature cannot be replayed
+  from another context or against another object.
+
+Sealed grants carry no server-verifiable author, so they are append-only
+and their deletion is authorized only by knowing the random blob ID. That
+is the same exposure a shared folder gives anyone who can list it, and
+soft revoke is documented as the weak tier regardless (§6).
+
+Honest cost of the change: the threat model in §9 shifts. A compromised
+server now yields **ciphertext plus metadata** (who talks to whom, when,
+message sizes and count) rather than metadata alone, and it becomes an
+availability dependency for folderless conversations — it can withhold or
+delete blobs, though it cannot forge or read one. Peers who share a folder
+still need no server at all, and that remains the stronger configuration.
+The v0.1 "no durable content" promise survives only for folder-backed use.
+
+**A6 — Invite codes (2026-07-23).** A folderless conversation has nowhere
+to put the marker of §5, so its facts (conversation ID, creator, roster)
+travel as a pasteable code instead. An invite is **not** a capability and
+carries no key: access still requires a member-key blob sealed to the
+joiner's identity and signed by the creator, so a stolen invite reveals
+only the roster — metadata the server and storage provider already hold —
+and reads nothing. Folder conversations also emit one, as a convenience
+that carries the folder path as a hint.
+
 ## 12. Roadmap
 
 Status as built; see `docs/STATUS.md` for detail and known shortcuts.
@@ -336,18 +380,23 @@ Status as built; see `docs/STATUS.md` for detail and known shortcuts.
   per-message recipient selection (A3); unit tests for the object, grant
   and identity layers, with the sealed-box wire format pinned by a golden
   vector.
-- **v0.4 (next).** `conv rekey` — group-key epoch rotation, which is what
-  closes §10.1 for group-keyed messages. Then the grant relay (§7) so
-  peers with no shared folder can exchange grants.
-- **v0.5.** Dropbox / S3 backends behind the §8 `Store` interface, with
+- **v0.4 — done.** The blob relay (§7, amended by A5): peers with no
+  shared folder chat through the server, which stores ciphertext it
+  cannot decrypt and authorizes rewrites by signature. Joining is an
+  invite code (A6). Revoke, hide and unhide all work over the network.
+- **v0.5 (next).** `conv rekey` — group-key epoch rotation, which is what
+  closes §10.1 for group-keyed messages. Then relay persistence (blobs
+  are in-memory today, so a server restart loses them).
+- **v0.6.** Dropbox / S3 backends behind the §8 `Store` interface, with
   hard-revoke semantics validated against provider version history (§6);
   Lambda deployment.
-- **v0.6.** Multi-device pairing (§10.2); dummy slots and payload padding
+- **v0.7.** Multi-device pairing (§10.2); dummy slots and payload padding
   (§4); a `compact` operation to flatten long wrap chains (A1).
 
 Deviations from the original plan worth noting: the server arrived with
-SSE instead of WebSockets, and grant *relay* is still unbuilt — peers
-currently need a shared folder, so the server does directory and
-notification only. AEAD is AES-256-GCM throughout rather than the
-XChaCha20-Poly1305 secretstream of §3/§4; that swap matters when large
-media payloads land, since streaming is what secretstream buys.
+SSE instead of WebSockets, and the relay is durable rather than
+store-and-forward (A5, with the threat-model consequences recorded there).
+Relay blobs live in memory, so a server restart loses them — a storage
+backend, not a protocol, concern. AEAD is AES-256-GCM throughout rather
+than the XChaCha20-Poly1305 secretstream of §3/§4; that swap matters when
+large media payloads land, since streaming is what secretstream buys.

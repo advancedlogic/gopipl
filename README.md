@@ -35,6 +35,27 @@ go build -o bin/ ./cmd/...
 ./demo-recipients.sh   # per-message recipient selection
 ```
 
+### No shared folder needed
+
+A conversation created without `-dir` relays through the server, which
+stores ciphertext it cannot decrypt. Peers join with a pasted invite code
+and need nothing else in common:
+
+```sh
+bin/pipl-server &
+
+bin/pipl -home ./peers/alice conv new -name team -with bob,carol
+# -> invite: pipl1:eyJpIjoi...
+
+bin/pipl -home ./peers/bob conv join -name team -invite pipl1:eyJpIjoi...
+```
+
+Revoke, hide and unhide all work this way: the server verifies each
+object's signature, so only its owner can rewrite or delete it. An invite
+carries **no key** — access still requires a member key sealed to your
+identity, so a stolen code reads nothing. `./demo-relay.sh` proves the
+whole flow, including that everything the server holds is ciphertext.
+
 ### Interactive UI
 
 Run `pipl` with no arguments. Each instance is a separate peer, selected by

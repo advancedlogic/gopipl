@@ -3,11 +3,10 @@ package chat
 import (
 	"crypto/ed25519"
 	"fmt"
-	"os"
 
 	"github.com/antonio/pipl/internal/object"
+	"github.com/antonio/pipl/internal/relay"
 	"github.com/antonio/pipl/internal/state"
-	"github.com/antonio/pipl/internal/store"
 )
 
 // ErrNotOwner is returned when a peer tries to revoke or hide an object it
@@ -74,11 +73,15 @@ func (e *Env) RevokeFrom(convName, objectID, handle string) (layers, slots int, 
 		}
 		newSlots = append(newSlots, slot)
 	}
-	if err := wrapObject(conv, &o, newLayerKey, newSlots); err != nil {
+	be, err := e.backendFor(conv)
+	if err != nil {
+		return 0, 0, err
+	}
+	if err := wrapObject(be, &o, newLayerKey, newSlots); err != nil {
 		return 0, 0, err
 	}
 	if gn, ok := o.GrantFiles[handle]; ok {
-		os.Remove(store.GrantPath(conv.Dir, gn))
+		_ = be.DeleteGrant(gn)
 		delete(o.GrantFiles, handle)
 	}
 	owned[objectID] = o
@@ -112,7 +115,11 @@ func (e *Env) Hide(convName, objectID string) error {
 	if err != nil {
 		return err
 	}
-	if err := wrapObject(conv, &o, newLayerKey, nil); err != nil {
+	be, err := e.backendFor(conv)
+	if err != nil {
+		return err
+	}
+	if err := wrapObject(be, &o, newLayerKey, nil); err != nil {
 		return err
 	}
 	o.Hidden = true
@@ -142,8 +149,11 @@ func (e *Env) Unhide(convName, objectID string) error {
 	if !o.Hidden {
 		return fmt.Errorf("object %s is not hidden", objectID)
 	}
-	path := store.ObjectPath(conv.Dir, o.ObjectID)
-	data, err := os.ReadFile(path)
+	be, err := e.backendFor(conv)
+	if err != nil {
+		return err
+	}
+	data, err := be.GetObject(o.ObjectID)
 	if err != nil {
 		return err
 	}
@@ -162,7 +172,7 @@ func (e *Env) Unhide(convName, objectID string) error {
 	if err != nil {
 		return fmt.Errorf("inner object corrupt: %w", err)
 	}
-	if err := store.WriteAtomic(path, inner); err != nil {
+	if err := be.PutObject(o.ObjectID, inner); err != nil {
 		return err
 	}
 	o.LayerKeys = o.LayerKeys[1:]
@@ -190,9 +200,19 @@ func (e *Env) RevokeAll(convName, objectID string) error {
 	if !ok {
 		return ErrNotOwner{objectID}
 	}
-	os.Remove(store.ObjectPath(conv.Dir, o.ObjectID))
+	be, err := e.backendFor(conv)
+	if err != nil {
+		return err
+	}
+	// The relay authorizes deletion by signature under the object's own
+	// signing key; the folder ignores it. Signing here costs nothing and
+	// keeps the two backends interchangeable.
+	sig := ed25519.Sign(ed25519.PrivateKey(o.ObjSignPriv), relay.DeleteChallenge(o.ObjectID))
+	if err := be.DeleteObject(o.ObjectID, sig); err != nil {
+		return err
+	}
 	for _, gname := range o.GrantFiles {
-		os.Remove(store.GrantPath(conv.Dir, gname))
+		_ = be.DeleteGrant(gname)
 	}
 	delete(owned, objectID)
 	if err := e.St.SaveOwned(owned); err != nil {
@@ -224,7 +244,11 @@ func (e *Env) RevokeSoft(convName, objectID, handle string) error {
 		return fmt.Errorf("%q has no access to object %s", handle, objectID)
 	}
 	if gn, ok := o.GrantFiles[handle]; ok {
-		os.Remove(store.GrantPath(conv.Dir, gn))
+		be, err := e.backendFor(conv)
+		if err != nil {
+			return err
+		}
+		_ = be.DeleteGrant(gn)
 		delete(o.GrantFiles, handle)
 	}
 	owned[objectID] = o
@@ -239,11 +263,10 @@ func (e *Env) RevokeSoft(convName, objectID, handle string) error {
 // becomes the plaintext of a new signed layer whose key is offered through
 // the given slots (nil slots = hidden from everyone). One encryption pass,
 // no plaintext in memory — and reversible by peeling the layer off.
-func wrapObject(conv state.Conversation, o *state.OwnedObject, newLayerKey []byte, slots [][]byte) error {
-	path := store.ObjectPath(conv.Dir, o.ObjectID)
-	data, err := os.ReadFile(path)
+func wrapObject(be backend, o *state.OwnedObject, newLayerKey []byte, slots [][]byte) error {
+	data, err := be.GetObject(o.ObjectID)
 	if err != nil {
-		return fmt.Errorf("object file missing: %w", err)
+		return fmt.Errorf("object missing: %w", err)
 	}
 	if _, err := object.Decode(data); err != nil {
 		return fmt.Errorf("refusing to wrap: %w", err)
@@ -261,7 +284,7 @@ func wrapObject(conv state.Conversation, o *state.OwnedObject, newLayerKey []byt
 	if err != nil {
 		return err
 	}
-	if err := store.WriteAtomic(path, wrapped); err != nil {
+	if err := be.PutObject(o.ObjectID, wrapped); err != nil {
 		return err
 	}
 	o.LayerKeys = append([][]byte{newLayerKey}, o.LayerKeys...)

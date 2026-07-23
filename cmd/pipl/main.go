@@ -63,6 +63,8 @@ func main() {
 			err = cmdConvNew(args[2:])
 		case "join":
 			err = cmdConvJoin(args[2:])
+		case "invite":
+			err = cmdConvInvite(args[2:])
 		default:
 			usage()
 			os.Exit(2)
@@ -99,8 +101,11 @@ func usage() {
               directories. Overrides $PIPL_HOME; default ~/.pipl.
 
   pipl init   -handle NAME [-server URL]        create identity
-  pipl conv new  -name NAME -dir DIR -with H,H  start a conversation in a shared folder
-  pipl conv join -name NAME -dir DIR            join a conversation from its folder
+  pipl conv new  -name NAME -with H,H [-dir D]  start a conversation. With -dir it lives in a
+                                                shared folder; without, it relays through the
+                                                server (no folder needed) and prints an invite.
+  pipl conv join -name NAME (-invite CODE|-dir D)  join by invite code, or from a shared folder
+  pipl conv invite -name NAME                   reprint a conversation's invite code
   pipl send   -conv NAME [-to H,H] MESSAGE...   send text (default: whole roster, one shared
                                                 group key; -to a subset: per-recipient keys,
                                                 individually revocable)
@@ -203,11 +208,11 @@ func cmdInit(args []string) error {
 func cmdConvNew(args []string) error {
 	fs := flag.NewFlagSet("conv new", flag.ExitOnError)
 	name := fs.String("name", "", "local name for the conversation (required)")
-	dir := fs.String("dir", "", "shared folder for the conversation (required)")
+	dir := fs.String("dir", "", "shared folder; omit to relay through the server instead")
 	with := fs.String("with", "", "comma-separated peer handles (required)")
 	fs.Parse(args)
-	if *name == "" || *dir == "" || *with == "" {
-		return fmt.Errorf("-name, -dir and -with are required")
+	if *name == "" || *with == "" {
+		return fmt.Errorf("-name and -with are required")
 	}
 	e, err := chat.Load()
 	if err != nil {
@@ -217,29 +222,69 @@ func cmdConvNew(args []string) error {
 	if err != nil {
 		return err
 	}
+	where := conv.Dir
+	if where == "" {
+		where = "the server relay (no shared folder needed)"
+	}
 	fmt.Printf("conversation %q created in %s (members: %s; group key distributed)\n",
-		conv.Name, conv.Dir, strings.Join(conv.Members, ", "))
+		conv.Name, where, strings.Join(conv.Members, ", "))
+	code, err := e.Invite(conv.Name)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("\ninvite (send to the others, then they run 'pipl conv join -name %s -invite CODE'):\n%s\n",
+		conv.Name, code)
 	return nil
 }
 
 func cmdConvJoin(args []string) error {
 	fs := flag.NewFlagSet("conv join", flag.ExitOnError)
 	name := fs.String("name", "", "local name for the conversation (required)")
-	dir := fs.String("dir", "", "shared folder of the conversation (required)")
+	dir := fs.String("dir", "", "shared folder of the conversation")
+	invite := fs.String("invite", "", "invite code from the creator (instead of -dir)")
 	fs.Parse(args)
-	if *name == "" || *dir == "" {
-		return fmt.Errorf("-name and -dir are required")
+	if *name == "" || (*dir == "" && *invite == "") {
+		return fmt.Errorf("-name and one of -dir or -invite are required")
 	}
 	e, err := chat.Load()
 	if err != nil {
 		return err
 	}
-	conv, err := e.JoinConversation(*name, *dir, pinNotice)
+	var conv state.Conversation
+	if *invite != "" {
+		conv, err = e.JoinInvite(*name, *invite, pinNotice)
+	} else {
+		conv, err = e.JoinConversation(*name, *dir, pinNotice)
+	}
 	if err != nil {
 		return err
 	}
+	where := conv.Dir
+	if where == "" {
+		where = "the server relay"
+	}
 	fmt.Printf("joined conversation %q in %s (members: %s; group key received)\n",
-		conv.Name, conv.Dir, strings.Join(conv.Members, ", "))
+		conv.Name, where, strings.Join(conv.Members, ", "))
+	return nil
+}
+
+// cmdConvInvite reprints a conversation's invite code.
+func cmdConvInvite(args []string) error {
+	fs := flag.NewFlagSet("conv invite", flag.ExitOnError)
+	name := fs.String("name", "", "conversation name (required)")
+	fs.Parse(args)
+	if *name == "" {
+		return fmt.Errorf("-name is required")
+	}
+	e, err := chat.Load()
+	if err != nil {
+		return err
+	}
+	code, err := e.Invite(*name)
+	if err != nil {
+		return err
+	}
+	fmt.Println(code)
 	return nil
 }
 

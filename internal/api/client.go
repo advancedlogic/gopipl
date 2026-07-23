@@ -8,9 +8,12 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -65,6 +68,125 @@ func (c *Client) post(path string, body any) error {
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
 		return fmt.Errorf("server: %s", resp.Status)
+	}
+	return nil
+}
+
+// ---- blob relay ------------------------------------------------------------
+//
+// Objects and grants stored on the server as opaque ciphertext, for peers
+// who share no filesystem. Nothing here sends a key: the payloads are the
+// same encrypted bytes that would otherwise sit in a shared folder.
+
+// BlobEntry is one item in a conversation's relay listing.
+type BlobEntry struct {
+	ID        string    `json:"id"`
+	Kind      string    `json:"kind"` // "object" | "grant"
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+func (c *Client) PutObject(convID, objectID string, data []byte) error {
+	return c.put("/v1/blobs/"+convID+"/objects/"+objectID, data)
+}
+
+func (c *Client) PutGrant(convID, grantID string, data []byte) error {
+	return c.put("/v1/blobs/"+convID+"/grants/"+grantID, data)
+}
+
+func (c *Client) ListBlobs(convID string) ([]BlobEntry, error) {
+	resp, err := c.http.Get(c.Base + "/v1/blobs/" + convID)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("server: %s", resp.Status)
+	}
+	var out []BlobEntry
+	return out, json.NewDecoder(resp.Body).Decode(&out)
+}
+
+// GetBlob fetches one blob. A missing blob returns os.ErrNotExist so
+// callers can treat it the same way as a deleted file in a folder.
+func (c *Client) GetBlob(convID, id string) ([]byte, error) {
+	resp, err := c.http.Get(c.Base + "/v1/blobs/" + convID + "/" + id)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, os.ErrNotExist
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("server: %s", resp.Status)
+	}
+	return io.ReadAll(resp.Body)
+}
+
+// DeleteObject removes a relayed object. sig must be the owner's
+// signature over relay.DeleteChallenge(objectID) — the server refuses
+// anything else, so this cannot be used against another peer's object.
+func (c *Client) DeleteObject(convID, objectID string, sig []byte) error {
+	req, err := http.NewRequest(http.MethodDelete,
+		c.Base+"/v1/blobs/"+convID+"/objects/"+objectID+"?sig="+hex.EncodeToString(sig), nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return os.ErrNotExist
+	}
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("server: %s", resp.Status)
+	}
+	return nil
+}
+
+// DeleteGrant removes a sealed grant blob (soft revoke).
+//
+// Unlike an object, a sealed grant carries no signature the server can
+// verify, so the server cannot tell the owner from anyone else who knows
+// the blob ID. Grant IDs are random and known only to peers who listed
+// the conversation, which is the same exposure a shared folder gives —
+// but it is weaker than object deletion, and soft revoke is documented as
+// the weak tier regardless.
+func (c *Client) DeleteGrant(convID, grantID string) error {
+	req, err := http.NewRequest(http.MethodDelete, c.Base+"/v1/blobs/"+convID+"/grants/"+grantID, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return os.ErrNotExist
+	}
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("server: %s", resp.Status)
+	}
+	return nil
+}
+
+func (c *Client) put(path string, data []byte) error {
+	req, err := http.NewRequest(http.MethodPut, c.Base+path, bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("server: %s: %s", resp.Status, strings.TrimSpace(string(body)))
 	}
 	return nil
 }

@@ -140,7 +140,10 @@ func (m Model) viewConversations() string {
 func (m Model) viewNewConv() string {
 	var b strings.Builder
 	b.WriteString(styTitle.Render("New conversation") + "\n\n")
-	labels := []string{"name", "shared folder"}
+	b.WriteString(styMuted.Render(
+		"Leave the folder empty to relay through the server: peers then\n"+
+			"need nothing in common but the invite code you get back.") + "\n\n")
+	labels := []string{"name", "shared folder (optional)"}
 	for i := range m.form {
 		mark := "  "
 		if m.formIdx == i {
@@ -178,9 +181,10 @@ func (m Model) viewJoinConv() string {
 	var b strings.Builder
 	b.WriteString(styTitle.Render("Join conversation") + "\n\n")
 	b.WriteString(styMuted.Render(
-		"Point at a folder someone created you into. Your group key is\n"+
-			"recovered from the sealed member-key file addressed to you.") + "\n\n")
-	labels := []string{"name", "shared folder"}
+		"Paste an invite code, or point at a shared folder. Either way your\n"+
+			"group key comes from a member-key blob sealed to your identity\n"+
+			"and signed by the creator — the code itself grants nothing.") + "\n\n")
+	labels := []string{"name", "invite code or folder"}
 	for i := range m.form {
 		mark := "  "
 		if m.formIdx == i {
@@ -272,9 +276,17 @@ func (m Model) viewChat() string {
 	keys := "tab=switch pane  enter=send  esc=back  ctrl+c=quit"
 	switch m.focus {
 	case focusRecipients:
-		keys = "space=toggle  a=all  tab=switch pane  esc=back"
+		keys = "space=toggle  a=all  i=invite  tab=switch pane  esc=back"
 	case focusHistory:
-		keys = "↑/↓=select  h=hide  u=unhide  r=revoke highlighted recipient  tab=switch pane"
+		keys = "↑/↓=select  h=hide  u=unhide  r=revoke highlighted  i=invite  tab=switch pane"
+	}
+
+	if m.showInvite {
+		body = styPanelHot.Width(m.history.Width + m.sidebarWidth() + 2).Render(
+			styTitle.Render("invite code") + "\n" +
+				styMuted.Render("Anyone with this can ask to join. It carries no key:\n"+
+					"access still needs a member key sealed to their identity.") + "\n\n" +
+				m.invite)
 	}
 
 	return title + "\n" + body + "\n" + m.input.View() + m.footer(keys)

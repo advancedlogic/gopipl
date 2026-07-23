@@ -1,18 +1,32 @@
 // pipl-server: the deliberately minimal coordination server.
 //
-// It holds NO keys, NO plaintext, NO capabilities, and NO chat content —
-// only a public-identity directory (TOFU) and ephemeral "conversation X
-// changed" notifications. Compromise of this server yields, at worst,
-// metadata. Peers sharing a filesystem can chat without it entirely.
+// It holds NO keys, NO plaintext, and NO capabilities: a public-identity
+// directory (TOFU), "conversation X changed" notifications, and a blob
+// relay that stores ciphertext it cannot decrypt.
+//
+// The relay is what lets peers who share no filesystem chat at all
+// (design §7, amendment A5). It is durable rather than store-and-forward,
+// because revocation works by rewriting a stored object — a blob deleted
+// on delivery could never be revoked. The server authorizes rewrites by
+// verifying each object's Ed25519 signature, which is a public operation:
+// it can check authorship without holding any secret, so only an object's
+// owner can replace or delete it.
+//
+// Compromise of this server therefore yields ciphertext and metadata
+// (who talks to whom, when, and how big) — never content. Peers sharing a
+// filesystem can still chat with no server at all.
 //
 // Single static binary; stdlib only. The same handler set is designed to
 // mount behind AWS Lambda + API Gateway later (see design doc §7).
 package main
 
 import (
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -20,6 +34,7 @@ import (
 	"time"
 
 	"github.com/antonio/pipl/internal/identity"
+	"github.com/antonio/pipl/internal/relay"
 )
 
 // ---- notification hub ------------------------------------------------------
@@ -127,6 +142,7 @@ func main() {
 		log.Fatal(err)
 	}
 	h := newHub()
+	blobs := relay.NewStore()
 
 	mux := http.NewServeMux()
 
@@ -204,6 +220,113 @@ func main() {
 		}
 	})
 
-	log.Printf("pipl-server listening on %s (keyless: identity directory + notifications only)", *addr)
+	// ---- sealed-blob relay -------------------------------------------------
+	//
+	// Durable storage for ciphertext the server cannot read, so peers who
+	// share no filesystem can still exchange objects and grants. The server
+	// verifies object signatures — a public operation needing no secret —
+	// so only an object's owner can rewrite or delete it. See design §7/A5.
+
+	mux.HandleFunc("PUT /v1/blobs/{conv}/objects/{id}", func(w http.ResponseWriter, r *http.Request) {
+		data, err := readLimited(r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		switch err := blobs.PutObject(r.PathValue("conv"), r.PathValue("id"), data); {
+		case err == nil:
+			h.notify(r.PathValue("conv"))
+			w.WriteHeader(http.StatusNoContent)
+		case errors.Is(err, relay.ErrNotOwner):
+			// Someone tried to overwrite an object they do not own.
+			http.Error(w, err.Error(), http.StatusForbidden)
+		default:
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		}
+	})
+
+	mux.HandleFunc("PUT /v1/blobs/{conv}/grants/{id}", func(w http.ResponseWriter, r *http.Request) {
+		data, err := readLimited(r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := blobs.PutGrant(r.PathValue("conv"), r.PathValue("id"), data); err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		h.notify(r.PathValue("conv"))
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	mux.HandleFunc("GET /v1/blobs/{conv}", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(blobs.List(r.PathValue("conv")))
+	})
+
+	mux.HandleFunc("GET /v1/blobs/{conv}/{id}", func(w http.ResponseWriter, r *http.Request) {
+		b, err := blobs.Get(r.PathValue("id"))
+		if err != nil || b.ConversationID != r.PathValue("conv") {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Write(b.Data)
+	})
+
+	// Grant deletion (soft revoke). A sealed grant carries no signature
+	// the server can verify, so authorization here rests only on knowing
+	// the random blob ID — the same exposure a shared folder gives anyone
+	// who can list it. Soft revoke is the documented weak tier either way;
+	// hard revoke rewrites the object, which IS signature-checked.
+	mux.HandleFunc("DELETE /v1/blobs/{conv}/grants/{id}", func(w http.ResponseWriter, r *http.Request) {
+		if err := blobs.DeleteGrant(r.PathValue("conv"), r.PathValue("id")); err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		h.notify(r.PathValue("conv"))
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	// Deletion is authorized by a signature over a fixed challenge under
+	// the object's own signing key: no accounts, no passwords, and the
+	// server still cannot mint one.
+	mux.HandleFunc("DELETE /v1/blobs/{conv}/objects/{id}", func(w http.ResponseWriter, r *http.Request) {
+		sig, err := hex.DecodeString(r.URL.Query().Get("sig"))
+		if err != nil || len(sig) == 0 {
+			http.Error(w, "missing or malformed ?sig", http.StatusBadRequest)
+			return
+		}
+		switch err := blobs.DeleteObject(r.PathValue("id"), sig); {
+		case err == nil:
+			h.notify(r.PathValue("conv"))
+			w.WriteHeader(http.StatusNoContent)
+		case errors.Is(err, relay.ErrNotFound):
+			http.NotFound(w, r)
+		default:
+			http.Error(w, err.Error(), http.StatusForbidden)
+		}
+	})
+
+	log.Printf("pipl-server listening on %s", *addr)
+	log.Print("  keyless: identity directory, notifications, and a blob relay that stores only ciphertext")
 	log.Fatal(http.ListenAndServe(*addr, mux))
+}
+
+// maxBlob bounds a single upload. Generous for text, and a backstop
+// against a peer filling the server with one request.
+const maxBlob = 8 << 20 // 8 MiB
+
+func readLimited(r *http.Request) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r.Body, maxBlob+1))
+	if err != nil {
+		return nil, errors.New("read error")
+	}
+	if len(data) > maxBlob {
+		return nil, fmt.Errorf("blob exceeds %d bytes", maxBlob)
+	}
+	if len(data) == 0 {
+		return nil, errors.New("empty body")
+	}
+	return data, nil
 }

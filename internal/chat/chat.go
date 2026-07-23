@@ -183,9 +183,18 @@ type Marker struct {
 
 func MarkerPath(dir string) string { return dir + string(os.PathSeparator) + "pipl-conv.json" }
 
-// NewConversation creates a conversation in a shared folder and
-// distributes the group key as sealed .mkey files, one per member.
+// NewConversation creates a conversation and distributes the group key as
+// sealed member-key blobs, one per member.
+//
+// dir selects the transport. A path makes the conversation folder-backed
+// (peers with shared storage); an empty dir makes it relay-backed, where
+// the encrypted blobs live on the server and peers need nothing in common
+// but the invite code from Invite.
 func (e *Env) NewConversation(name, dir string, with []string, onPin func(identity.PublicIdentity)) (state.Conversation, error) {
+	if dir == "" && e.Cl == nil {
+		return state.Conversation{}, fmt.Errorf(
+			"a conversation needs either a shared folder or a server to relay through")
+	}
 	members := []string{e.ID.Handle}
 	for _, h := range with {
 		h = strings.TrimSpace(h)
@@ -202,18 +211,35 @@ func (e *Env) NewConversation(name, dir string, with []string, onPin func(identi
 	if err != nil {
 		return state.Conversation{}, err
 	}
-	marker, err := json.MarshalIndent(Marker{ID: convID, Creator: e.ID.Handle, Members: members}, "", "  ")
+
+	conv := state.Conversation{
+		Name: name, ID: convID, Dir: dir, Creator: e.ID.Handle,
+		Members: members,
+	}
+	be, err := e.backendFor(conv)
 	if err != nil {
 		return state.Conversation{}, err
 	}
-	if err := store.WriteAtomic(MarkerPath(dir), marker); err != nil {
-		return state.Conversation{}, err
-	}
-	if err := os.MkdirAll(store.ObjectsDir(dir), 0o755); err != nil {
-		return state.Conversation{}, err
-	}
-	if err := os.MkdirAll(store.GrantsDir(dir), 0o755); err != nil {
-		return state.Conversation{}, err
+
+	// The marker records the roster where joiners can find it. Folder
+	// conversations keep it as a file (readable by whoever hosts the
+	// folder — a known metadata leak); relay conversations carry the same
+	// facts inside the invite code instead, so the server never gets a
+	// roster it was not already able to infer from traffic.
+	if dir != "" {
+		marker, err := json.MarshalIndent(Marker{ID: convID, Creator: e.ID.Handle, Members: members}, "", "  ")
+		if err != nil {
+			return state.Conversation{}, err
+		}
+		if err := store.WriteAtomic(MarkerPath(dir), marker); err != nil {
+			return state.Conversation{}, err
+		}
+		if err := os.MkdirAll(store.ObjectsDir(dir), 0o755); err != nil {
+			return state.Conversation{}, err
+		}
+		if err := os.MkdirAll(store.GrantsDir(dir), 0o755); err != nil {
+			return state.Conversation{}, err
+		}
 	}
 
 	// Group key (epoch 1), sealed individually to each member: a one-time
@@ -243,24 +269,22 @@ func (e *Env) NewConversation(name, dir string, with []string, onPin func(identi
 		if err != nil {
 			return state.Conversation{}, err
 		}
-		if err := store.WriteAtomic(store.GrantPath(dir, mname+".mkey"), blob); err != nil {
+		if err := be.PutGrant(mname+".mkey", blob); err != nil {
 			return state.Conversation{}, err
 		}
 	}
 
-	conv := state.Conversation{
-		Name: name, ID: convID, Dir: dir, Creator: e.ID.Handle,
-		Members: members, GroupKey: groupKey,
-	}
+	conv.GroupKey = groupKey
 	if err := e.saveConv(name, conv); err != nil {
 		return state.Conversation{}, err
 	}
+	e.Notify(convID)
 	return conv, nil
 }
 
-// JoinConversation reads a conversation marker and recovers the group key
-// from the sealed .mkey file addressed to this peer. The key is trusted
-// only because the conversation creator signed it.
+// JoinConversation joins a folder-backed conversation by reading the
+// marker its creator left in the shared folder. For relay-backed
+// conversations use JoinInvite instead.
 func (e *Env) JoinConversation(name, dir string, onPin func(identity.PublicIdentity)) (state.Conversation, error) {
 	data, err := os.ReadFile(MarkerPath(dir))
 	if err != nil {
@@ -270,6 +294,31 @@ func (e *Env) JoinConversation(name, dir string, onPin func(identity.PublicIdent
 	if err := json.Unmarshal(data, &m); err != nil {
 		return state.Conversation{}, err
 	}
+	return e.join(name, dir, m, onPin)
+}
+
+// JoinInvite joins using an invite code, which carries the same facts a
+// folder marker would (conversation ID, creator, roster). The code is not
+// a secret that grants access: the group key still arrives only as a
+// member-key blob sealed to this peer's identity and signed by the
+// creator, so a stolen code lets nobody read anything.
+func (e *Env) JoinInvite(name, code string, onPin func(identity.PublicIdentity)) (state.Conversation, error) {
+	inv, err := ParseInvite(code)
+	if err != nil {
+		return state.Conversation{}, err
+	}
+	if inv.Server != "" && e.Cfg.Server == "" {
+		return state.Conversation{}, fmt.Errorf(
+			"this invite relays through %s but you have no server configured (re-run 'pipl init -server %s')",
+			inv.Server, inv.Server)
+	}
+	return e.join(name, inv.Dir, Marker{ID: inv.ID, Creator: inv.Creator, Members: inv.Members}, onPin)
+}
+
+// join is the shared tail of both: verify membership, then recover the
+// group key from the sealed member-key blob addressed to this peer. The
+// key is trusted only because the conversation creator signed it.
+func (e *Env) join(name, dir string, m Marker, onPin func(identity.PublicIdentity)) (state.Conversation, error) {
 	found := false
 	for _, h := range m.Members {
 		if h == e.ID.Handle {
@@ -287,17 +336,20 @@ func (e *Env) JoinConversation(name, dir string, onPin func(identity.PublicIdent
 	if err != nil {
 		return state.Conversation{}, err
 	}
-	var groupKey []byte
-	mkFiles, err := store.ListMemberKeyFiles(dir)
+	conv := state.Conversation{
+		Name: name, ID: m.ID, Dir: dir, Creator: m.Creator, Members: m.Members,
+	}
+	be, err := e.backendFor(conv)
 	if err != nil {
 		return state.Conversation{}, err
 	}
+	mkFiles, err := be.MemberKeys()
+	if err != nil {
+		return state.Conversation{}, err
+	}
+	var groupKey []byte
 	for _, f := range mkFiles {
-		blob, err := os.ReadFile(f)
-		if err != nil {
-			continue
-		}
-		mk, err := grant.OpenMemberKey(e.ID, blob)
+		mk, err := grant.OpenMemberKey(e.ID, f.Data)
 		if err != nil {
 			continue // not sealed to us
 		}
@@ -311,12 +363,14 @@ func (e *Env) JoinConversation(name, dir string, onPin func(identity.PublicIdent
 		break
 	}
 	if groupKey == nil {
-		return state.Conversation{}, fmt.Errorf("no valid member key for you in %s (was the conversation created with you as a member?)", dir)
+		where := dir
+		if where == "" {
+			where = "the relay"
+		}
+		return state.Conversation{}, fmt.Errorf(
+			"no valid member key for you in %s (was the conversation created with you as a member?)", where)
 	}
-	conv := state.Conversation{
-		Name: name, ID: m.ID, Dir: dir, Creator: m.Creator,
-		Members: m.Members, GroupKey: groupKey,
-	}
+	conv.GroupKey = groupKey
 	if err := e.saveConv(name, conv); err != nil {
 		return state.Conversation{}, err
 	}
@@ -431,7 +485,11 @@ func (e *Env) Send(convName, body string, recipients []string, forceSeparate boo
 	if err != nil {
 		return SendResult{}, err
 	}
-	if err := store.WriteAtomic(store.ObjectPath(conv.Dir, oid), data); err != nil {
+	be, err := e.backendFor(conv)
+	if err != nil {
+		return SendResult{}, err
+	}
+	if err := be.PutObject(oid, data); err != nil {
 		return SendResult{}, err
 	}
 
@@ -456,7 +514,7 @@ func (e *Env) Send(convName, body string, recipients []string, forceSeparate boo
 				return SendResult{}, err
 			}
 			gname += ".grant"
-			if err := store.WriteAtomic(store.GrantPath(conv.Dir, gname), blob); err != nil {
+			if err := be.PutGrant(gname, blob); err != nil {
 				return SendResult{}, err
 			}
 			grantFiles[handle] = gname
@@ -476,7 +534,7 @@ func (e *Env) Send(convName, body string, recipients []string, forceSeparate boo
 			return SendResult{}, err
 		}
 		gname += ".grant"
-		if err := store.WriteAtomic(store.GrantPath(conv.Dir, gname), blob); err != nil {
+		if err := be.PutGrant(gname, blob); err != nil {
 			return SendResult{}, err
 		}
 		grantFiles["*group*"] = gname
@@ -569,7 +627,11 @@ type Message struct {
 // us, revoked, hidden, deleted — is silently skipped: absence of access is
 // not an error.
 func (e *Env) Messages(conv state.Conversation) ([]Message, error) {
-	files, err := store.ListGrantFiles(conv.Dir)
+	be, err := e.backendFor(conv)
+	if err != nil {
+		return nil, err
+	}
+	files, err := be.Grants()
 	if err != nil {
 		return nil, err
 	}
@@ -584,10 +646,7 @@ func (e *Env) Messages(conv state.Conversation) ([]Message, error) {
 	seen := map[string]bool{}
 	var msgs []Message
 	for _, f := range files {
-		blob, err := os.ReadFile(f)
-		if err != nil {
-			continue
-		}
+		blob := f.Data
 		// Personal sealed grant first, then the conversation group key.
 		g, err := grant.Open(e.ID, blob)
 		if err != nil && conv.GroupKey != nil {
@@ -609,7 +668,7 @@ func (e *Env) Messages(conv state.Conversation) ([]Message, error) {
 		if seen[g.Capability.ObjectID] {
 			continue
 		}
-		data, err := os.ReadFile(store.ObjectPath(conv.Dir, g.Capability.ObjectID))
+		data, err := be.GetObject(g.Capability.ObjectID)
 		if err != nil {
 			continue // object deleted (fully revoked)
 		}

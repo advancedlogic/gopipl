@@ -15,9 +15,18 @@ PIPL="$ROOT/bin/pipl"
 
 echo
 echo "== start keyless server =="
+# See demo.sh: a leftover server on this port would serve a stale identity
+# directory and make this demo fail confusingly.
+if curl -s -o /dev/null --max-time 1 http://127.0.0.1:8738/v1/identities/_probe 2>/dev/null; then
+  echo "FAIL: something is already listening on 127.0.0.1:8738 — stop it first" >&2
+  exit 1
+fi
 "$ROOT/bin/pipl-server" -addr 127.0.0.1:8738 >/dev/null 2>&1 &
 SERVER_PID=$!
 sleep 0.5
+if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+  echo "FAIL: server did not start" >&2; exit 1
+fi
 
 alice() { PIPL_HOME="$ROOT/alice" "$PIPL" "$@"; }
 bob()   { PIPL_HOME="$ROOT/bob"   "$PIPL" "$@"; }
