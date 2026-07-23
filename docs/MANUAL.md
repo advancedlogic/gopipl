@@ -236,6 +236,9 @@ of them:
 bin/pipl -home ./peers/alice send -conv team -to bob,carol "not for dave"
 ```
 
+In the UI: `tab` to the recipients pane and `space` to untick dave. The
+pane shows who is included before you send, and `a` puts everyone back.
+
 Dave cannot read this. Not "dave's client hides it" — **there is no key
 for dave anywhere in that message.** He can inspect every file involved
 and get nothing.
@@ -253,8 +256,21 @@ So: **if you might want to un-send to one person, use `-to`.** With a
 whole-roster message your only options are hiding it from everyone or
 deleting it.
 
-Use `-separate` to get per-recipient keys while still sending to everyone —
-useful when you expect to revoke someone later.
+### Sending to everyone, but keeping the option to revoke
+
+`-separate` gives per-recipient keys while still sending to the whole
+roster — the same cost as a subset send (one envelope each), but any
+single person can be revoked later:
+
+```sh
+bin/pipl -home ./peers/alice send -conv team -separate "might regret this"
+```
+
+In the UI: press `p` in the recipients pane. It stays on until you press
+it again, and the pane shows `[p] forced` while it is active.
+
+This is the one to reach for when you are about to say something you might
+want to take back from one person in particular.
 
 ---
 
@@ -267,11 +283,17 @@ be rewritten. Someone else trying gets:
 you do not own object pbi7oonov6mjq5w5uph2hwgjra (only the sender can do this)
 ```
 
-### Revoke one person (subset messages only)
+Each of these has a key in the UI's history pane, shown alongside the
+command below. Nothing here is CLI-only.
+
+### Revoke one person (subset messages only) — UI: `r`
 
 ```sh
 bin/pipl -home ./peers/alice revoke -conv team -object <id> -from carol
 ```
+
+In the UI: pick the message in the history pane, highlight carol in the
+recipients pane, press `r`.
 
 Carol can no longer read it. **Everyone else is untouched** — nobody gets
 re-sent a key, nobody notices. Under the hood the message is re-locked
@@ -287,7 +309,7 @@ individually revocable messages, or hide it from everyone
 
 That's the tradeoff from §6, showing up.
 
-### Hide from everyone, reversibly
+### Hide from everyone, reversibly — UI: `h` and `u`
 
 ```sh
 bin/pipl -home ./peers/alice hide   -conv team -object <id>
@@ -298,15 +320,22 @@ Hide makes a message unreadable to all recipients. Unhide brings it back
 for exactly the people who could read it before — nothing is re-sent. Good
 for "I shouldn't have posted that" when you may want it back.
 
-### Delete permanently
+A hidden message disappears from everyone's history, including yours —
+there is no key for it anywhere, so nothing decrypts. In the UI, `u` opens
+a separate list of what you've hidden, with a preview of each: you can
+still read your own, because you kept the keys that lock each layer. Pick
+one and `enter` restores it.
+
+### Delete permanently — UI: `d`
 
 ```sh
 bin/pipl -home ./peers/alice revoke -conv team -object <id> -all
 ```
 
-The message and all its keys are deleted. Not reversible.
+The message and all its keys are deleted. Not reversible — the UI asks
+`y/N` first.
 
-### The weak one
+### The weak one — UI: `s`
 
 ```sh
 bin/pipl -home ./peers/alice revoke -conv team -object <id> -from carol -soft
@@ -314,7 +343,7 @@ bin/pipl -home ./peers/alice revoke -conv team -object <id> -from carol -soft
 
 Deletes carol's envelope but not her access — if her client already
 fetched the key, she can still read it. Only useful against someone who
-never came online. Prefer plain `revoke`.
+never came online. Prefer plain `revoke` (`r`).
 
 ### What revocation cannot do
 
@@ -491,8 +520,14 @@ their entry from `peers.json` in your home directory to re-pin.
 **"you do not own object ..."** — only the sender can revoke or hide.
 
 **"...went to the whole group under one shared key"** — you're trying to
-revoke one person from a whole-roster message. Use `hide`, or send with
-`-to` next time (§6).
+revoke one person from a whole-roster message. Use `hide`, or next time
+send with `-to` (a subset) or `-separate` / `p` (everyone, but still
+individually revocable). See §6.
+
+**A message I hid has vanished from my own history too** — expected. Hiding
+removes the key for everyone including you, so nothing decrypts. Your
+hidden messages aren't lost: `u` in the UI lists them with previews, or
+`unhide -object <id>` if you kept the ID.
 
 **Messages not appearing** — check both sides use the same conversation
 (the `-name` may differ, the folder or invite must match), that the server
