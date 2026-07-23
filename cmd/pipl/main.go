@@ -53,6 +53,8 @@ func main() {
 		err = runTUI()
 	case "init":
 		err = cmdInit(args[1:])
+	case "register":
+		err = cmdRegister(args[1:])
 	case "conv":
 		if len(args) < 2 {
 			usage()
@@ -101,6 +103,7 @@ func usage() {
               directories. Overrides $PIPL_HOME; default ~/.pipl.
 
   pipl init   -handle NAME [-server URL]        create identity
+  pipl register                                 re-publish your identity (after a server reset)
   pipl conv new  -name NAME -with H,H [-dir D]  start a conversation. With -dir it lives in a
                                                 shared folder; without, it relays through the
                                                 server (no folder needed) and prints an invite.
@@ -200,6 +203,25 @@ func cmdInit(args []string) error {
 	if *server != "" && err == nil {
 		fmt.Printf("registered with %s\n", *server)
 	}
+	return nil
+}
+
+// cmdRegister re-publishes an existing identity to the directory. Needed
+// after the server loses its directory (e.g. a restart without -data),
+// which otherwise leaves the peer unresolvable with no way back — init
+// refuses once an identity exists.
+func cmdRegister(args []string) error {
+	fs := flag.NewFlagSet("register", flag.ExitOnError)
+	fs.Parse(args)
+	e, err := chat.Load()
+	if err != nil {
+		return err
+	}
+	if err := e.Register(); err != nil {
+		return err
+	}
+	pub := e.ID.Public()
+	fmt.Printf("re-registered %s (fingerprint %s) with %s\n", pub.Handle, pub.Fingerprint(), e.Cfg.Server)
 	return nil
 }
 

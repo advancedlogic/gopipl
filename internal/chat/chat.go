@@ -201,6 +201,20 @@ func Init(handle, server string) (identity.PublicIdentity, error) {
 	return pub, nil
 }
 
+// Register re-publishes this peer's existing identity to the directory.
+//
+// It exists because a registration can be lost without the identity being
+// lost — most often when the server is restarted without -data and its
+// in-memory directory is wiped. Init refuses to run once an identity
+// exists, so without this there was no way back: the peer stayed
+// unresolvable (404) and no one could create a conversation including it.
+func (e *Env) Register() error {
+	if e.Cl == nil {
+		return fmt.Errorf("no server configured (run with a server to be findable)")
+	}
+	return e.Cl.Register(e.ID.Public())
+}
+
 // HasIdentity reports whether this PIPL_HOME already holds an identity.
 func HasIdentity() (bool, string, error) {
 	st, err := state.Open()
@@ -392,6 +406,7 @@ func (e *Env) join(name, dir string, m Marker, onPin func(identity.PublicIdentit
 		return state.Conversation{}, err
 	}
 	var groupKey []byte
+	forThisConv := 0 // member keys that belong to this conversation
 	for _, f := range mkFiles {
 		mk, err := grant.OpenMemberKey(e.ID, f.Data)
 		if err != nil {
@@ -400,6 +415,7 @@ func (e *Env) join(name, dir string, m Marker, onPin func(identity.PublicIdentit
 		if mk.ConversationID != m.ID || mk.From != m.Creator {
 			continue
 		}
+		forThisConv++
 		if mk.Verify(ed25519.PublicKey(creator.SignPub)) != nil {
 			continue
 		}
@@ -411,8 +427,31 @@ func (e *Env) join(name, dir string, m Marker, onPin func(identity.PublicIdentit
 		if where == "" {
 			where = "the relay"
 		}
+		// Distinguish the two failure modes: none of the member keys were
+		// sealed to us (an identity mismatch — the usual cause is the
+		// creator having pinned a stale copy of our identity, e.g. after
+		// we were re-created), versus one that was sealed to us but signed
+		// by someone other than the named creator.
+		if forThisConv == 0 {
+			isMember := false
+			for _, h := range m.Members {
+				if h == e.ID.Handle {
+					isMember = true
+				}
+			}
+			if isMember {
+				return state.Conversation{}, fmt.Errorf(
+					"you are listed as a member of this conversation, but no member key in %s is sealed to your identity — "+
+						"the creator (%s) likely pinned an older copy of %q. Ask them to re-add you: on their side, "+
+						"remove %q from peers.json and re-create the conversation (your current identity must be registered: 'pipl register')",
+					where, m.Creator, e.ID.Handle, e.ID.Handle)
+			}
+			return state.Conversation{}, fmt.Errorf(
+				"your handle %q is not among this conversation's members (%v)", e.ID.Handle, m.Members)
+		}
 		return state.Conversation{}, fmt.Errorf(
-			"no valid member key for you in %s (was the conversation created with you as a member?)", where)
+			"a member key for you in %s failed verification against the creator %q's signing key "+
+				"(is %q the identity that really created it?)", where, m.Creator, m.Creator)
 	}
 	conv.GroupKey = groupKey
 	if err := e.saveConv(name, conv); err != nil {
