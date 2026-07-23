@@ -1,0 +1,11 @@
+# Normalize to LF in the repository; check out native on Windows.
+* text=auto
+
+# Shell scripts MUST stay LF even on Windows checkouts: bash rejects a
+# CRLF shebang line ("bad interpreter: /usr/bin/env bash^M").
+*.sh text eol=lf
+
+# Go tooling is LF-only by convention; gofmt output is LF.
+*.go text eol=lf
+go.mod text eol=lf
+go.sum text eol=lf

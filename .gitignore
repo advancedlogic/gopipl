@@ -1,0 +1,13 @@
+# Built binaries
+/bin/
+
+# Local peer state: identity private keys, group keys, and the per-object
+# signing keys that ARE the revocation authority. Never commit these.
+# `pipl -home ./peers/alice` and friends land here.
+/peers/
+.pipl/
+*.pipl-home/
+
+# Conversation folders, if created inside the repo while testing: these
+# hold encrypted objects and sealed grants.
+/shared/

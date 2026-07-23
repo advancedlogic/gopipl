@@ -1,0 +1,619 @@
+package tui
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/antonio/pipl/internal/chat"
+
+	"github.com/charmbracelet/bubbles/textinput"
+	tea "github.com/charmbracelet/bubbletea"
+)
+
+func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width, m.height = msg.Width, msg.Height
+		m.layout()
+		return m, nil
+
+	case statusMsg:
+		m.status, m.statusErr = msg.text, msg.isErr
+		return m, nil
+
+	case msgsLoaded:
+		if msg.err != nil {
+			m.setError(msg.err)
+			return m, nil
+		}
+		if msg.convID != m.conv.ID {
+			return m, nil // a stale load for a conversation we left
+		}
+		m.msgs = msg.msgs
+		if m.msgIdx >= len(m.msgs) {
+			m.msgIdx = max(0, len(m.msgs)-1)
+		}
+		m.renderHistory()
+		return m, nil
+
+	case folderChanged:
+		var cmds []tea.Cmd
+		cmds = append(cmds, waitForPush) // keep listening
+		if msg.convID == m.conv.ID {
+			cmds = append(cmds, m.loadMessages())
+		}
+		return m, tea.Batch(cmds...)
+
+	case tickMsg:
+		if m.screen != screenChat {
+			return m, nil
+		}
+		return m, tea.Batch(pollTick(), m.loadMessages())
+
+	case tea.KeyMsg:
+		return m.handleKey(msg)
+	}
+
+	// Route anything else to the focused text input.
+	return m.routeToInput(msg)
+}
+
+func (m Model) routeToInput(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	switch m.screen {
+	case screenChat:
+		if m.focus == focusInput {
+			m.input, cmd = m.input.Update(msg)
+		}
+	case screenSetup, screenNewConv, screenJoinConv:
+		if m.formIdx < len(m.form) {
+			m.form[m.formIdx], cmd = m.form[m.formIdx].Update(msg)
+		}
+	}
+	return m, cmd
+}
+
+func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// ctrl+c always quits, whatever has focus.
+	if msg.Type == tea.KeyCtrlC {
+		if m.cancelFollow != nil {
+			m.cancelFollow()
+		}
+		return m, tea.Quit
+	}
+	switch m.screen {
+	case screenSetup:
+		return m.keySetup(msg)
+	case screenConversations:
+		return m.keyConversations(msg)
+	case screenNewConv:
+		return m.keyNewConv(msg)
+	case screenJoinConv:
+		return m.keyJoinConv(msg)
+	case screenChat:
+		return m.keyChat(msg)
+	}
+	return m, nil
+}
+
+// ---- setup -----------------------------------------------------------------
+
+func (m Model) keySetup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEnter:
+		handle := strings.TrimSpace(m.form[0].Value())
+		if handle == "" {
+			m.setStatus("a handle is required")
+			return m, nil
+		}
+		server := defaultServer
+		if len(m.form) > 1 {
+			if s := strings.TrimSpace(m.form[1].Value()); s != "" {
+				server = s
+			}
+		}
+		pub, err := chat.Init(handle, server)
+		if err != nil {
+			// Registration failure is not fatal: the identity exists.
+			m.setError(err)
+			if pub.Handle == "" {
+				return m, nil
+			}
+		}
+		env, err := chat.Load()
+		if err != nil {
+			m.setError(err)
+			return m, nil
+		}
+		m.env = env
+		m.screen = screenConversations
+		if err := m.reloadConvs(); err != nil {
+			m.setError(err)
+			return m, nil
+		}
+		m.notice = fmt.Sprintf("identity %s (fingerprint %s) — peers should verify this out of band",
+			pub.Handle, pub.Fingerprint())
+		return m, nil
+	case tea.KeyTab, tea.KeyShiftTab:
+		if len(m.form) > 1 {
+			m.form[m.formIdx].Blur()
+			m.formIdx = (m.formIdx + 1) % len(m.form)
+			m.form[m.formIdx].Focus()
+		}
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.form[m.formIdx], cmd = m.form[m.formIdx].Update(msg)
+	return m, cmd
+}
+
+// ---- conversation list -----------------------------------------------------
+
+func (m Model) keyConversations(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "q", "esc":
+		if m.cancelFollow != nil {
+			m.cancelFollow()
+		}
+		return m, tea.Quit
+	case "up", "k":
+		if m.convIdx > 0 {
+			m.convIdx--
+		}
+		return m, nil
+	case "down", "j":
+		if m.convIdx < len(m.convs)-1 {
+			m.convIdx++
+		}
+		return m, nil
+	case "n":
+		m.screen = screenNewConv
+		m.form = []textinput.Model{
+			newInput("conversation name (local label)", 40),
+			newInput("shared folder path", 256),
+		}
+		m.formIdx = 0
+		m.form[0].Focus()
+		m.picked = map[string]bool{}
+		m.pickIdx = 0
+		m.loadDirectory()
+		m.setStatus("name and folder, then tab to pick members")
+		return m, nil
+	case "J":
+		m.screen = screenJoinConv
+		m.form = []textinput.Model{
+			newInput("conversation name (local label)", 40),
+			newInput("shared folder path", 256),
+		}
+		m.formIdx = 0
+		m.form[0].Focus()
+		m.setStatus("point at the folder a peer created")
+		return m, nil
+	case "enter":
+		if len(m.convs) == 0 {
+			m.setStatus("no conversations yet — press n to create one")
+			return m, nil
+		}
+		return m.openConversation(m.convIdx)
+	}
+	return m, nil
+}
+
+func (m Model) openConversation(idx int) (tea.Model, tea.Cmd) {
+	m.conv = m.convs[idx]
+	m.activeIdx = idx
+	m.screen = screenChat
+	m.input = newInput("message", 2000)
+	m.input.Focus()
+	m.focus = focusInput
+	m.msgIdx = 0
+	m.selectAll()
+	m.layout()
+	m.setStatus("everyone selected — group key (one slot, one grant)")
+	return m, tea.Batch(m.loadMessages(), m.follow(m.conv), textinput.Blink)
+}
+
+// loadDirectory collects handles this peer already knows: pinned peers
+// plus everyone in existing conversations. The picker offers these, and
+// free text handles anyone else.
+func (m *Model) loadDirectory() {
+	set := map[string]bool{}
+	if peers, err := m.env.St.Peers(); err == nil {
+		for h := range peers {
+			set[h] = true
+		}
+	}
+	for _, c := range m.convs {
+		for _, h := range c.Members {
+			set[h] = true
+		}
+	}
+	delete(set, m.env.Handle())
+	m.directory = m.directory[:0]
+	for h := range set {
+		m.directory = append(m.directory, h)
+	}
+	sortStrings(m.directory)
+}
+
+// ---- new conversation ------------------------------------------------------
+
+func (m Model) keyNewConv(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// formIdx == len(form) means focus is on the member picker.
+	onPicker := m.formIdx == len(m.form)
+
+	switch msg.Type {
+	case tea.KeyEsc:
+		m.screen = screenConversations
+		m.status = ""
+		return m, nil
+	case tea.KeyTab:
+		if m.formIdx < len(m.form) {
+			m.form[m.formIdx].Blur()
+		}
+		m.formIdx++
+		if m.formIdx > len(m.form) {
+			m.formIdx = 0
+		}
+		if m.formIdx < len(m.form) {
+			m.form[m.formIdx].Focus()
+		}
+		return m, nil
+	case tea.KeyShiftTab:
+		if m.formIdx < len(m.form) {
+			m.form[m.formIdx].Blur()
+		}
+		m.formIdx--
+		if m.formIdx < 0 {
+			m.formIdx = len(m.form)
+		}
+		if m.formIdx < len(m.form) {
+			m.form[m.formIdx].Focus()
+		}
+		return m, nil
+	}
+
+	if onPicker {
+		switch msg.String() {
+		case "up", "k":
+			if m.pickIdx > 0 {
+				m.pickIdx--
+			}
+			return m, nil
+		case "down", "j":
+			if m.pickIdx < len(m.directory)-1 {
+				m.pickIdx++
+			}
+			return m, nil
+		case " ":
+			if m.pickIdx < len(m.directory) {
+				h := m.directory[m.pickIdx]
+				m.picked[h] = !m.picked[h]
+			}
+			return m, nil
+		case "enter":
+			return m.createConversation()
+		}
+		return m, nil
+	}
+
+	if msg.Type == tea.KeyEnter {
+		return m.createConversation()
+	}
+	var cmd tea.Cmd
+	m.form[m.formIdx], cmd = m.form[m.formIdx].Update(msg)
+	return m, cmd
+}
+
+func (m Model) createConversation() (tea.Model, tea.Cmd) {
+	name := strings.TrimSpace(m.form[0].Value())
+	dir := strings.TrimSpace(m.form[1].Value())
+	if name == "" || dir == "" {
+		m.setStatus("name and folder are both required")
+		return m, nil
+	}
+	var with []string
+	for _, h := range m.directory {
+		if m.picked[h] {
+			with = append(with, h)
+		}
+	}
+	// Allow handles not yet known locally, typed as "a,b" in the name of
+	// convenience? No — the picker is the contract. Require at least one.
+	if len(with) == 0 {
+		m.setStatus("pick at least one member (tab to the list, space to toggle)")
+		return m, nil
+	}
+	conv, err := m.env.NewConversation(name, dir, with, m.onPin)
+	if err != nil {
+		m.setError(err)
+		return m, nil
+	}
+	if err := m.reloadConvs(); err != nil {
+		m.setError(err)
+		return m, nil
+	}
+	for i, c := range m.convs {
+		if c.ID == conv.ID {
+			m.screen = screenChat
+			return m.openConversation(i)
+		}
+	}
+	m.screen = screenConversations
+	return m, nil
+}
+
+// ---- join conversation -----------------------------------------------------
+
+func (m Model) keyJoinConv(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEsc:
+		m.screen = screenConversations
+		m.status = ""
+		return m, nil
+	case tea.KeyTab, tea.KeyShiftTab:
+		m.form[m.formIdx].Blur()
+		m.formIdx = (m.formIdx + 1) % len(m.form)
+		m.form[m.formIdx].Focus()
+		return m, nil
+	case tea.KeyEnter:
+		name := strings.TrimSpace(m.form[0].Value())
+		dir := strings.TrimSpace(m.form[1].Value())
+		if name == "" || dir == "" {
+			m.setStatus("name and folder are both required")
+			return m, nil
+		}
+		conv, err := m.env.JoinConversation(name, dir, m.onPin)
+		if err != nil {
+			m.setError(err)
+			return m, nil
+		}
+		if err := m.reloadConvs(); err != nil {
+			m.setError(err)
+			return m, nil
+		}
+		for i, c := range m.convs {
+			if c.ID == conv.ID {
+				return m.openConversation(i)
+			}
+		}
+		m.screen = screenConversations
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.form[m.formIdx], cmd = m.form[m.formIdx].Update(msg)
+	return m, cmd
+}
+
+// ---- chat ------------------------------------------------------------------
+
+func (m Model) keyChat(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEsc:
+		if m.cancelFollow != nil {
+			m.cancelFollow()
+			m.cancelFollow = nil
+		}
+		m.screen = screenConversations
+		m.status = ""
+		if err := m.reloadConvs(); err != nil {
+			m.setError(err)
+		}
+		return m, nil
+
+	case tea.KeyTab:
+		// input -> recipients -> history -> input
+		m.focus = (m.focus + 1) % 3
+		if m.focus == focusInput {
+			m.input.Focus()
+		} else {
+			m.input.Blur()
+		}
+		return m, nil
+
+	case tea.KeyEnter:
+		if m.focus == focusInput {
+			return m.send()
+		}
+		return m, nil
+	}
+
+	switch m.focus {
+	case focusRecipients:
+		return m.keyRecipients(msg)
+	case focusHistory:
+		return m.keyHistory(msg)
+	}
+
+	var cmd tea.Cmd
+	m.input, cmd = m.input.Update(msg)
+	return m, cmd
+}
+
+func (m Model) keyRecipients(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	others := m.others()
+	switch msg.String() {
+	case "up", "k":
+		if m.recipIdx > 0 {
+			m.recipIdx--
+		}
+	case "down", "j":
+		if m.recipIdx < len(others)-1 {
+			m.recipIdx++
+		}
+	case " ":
+		if m.recipIdx < len(others) {
+			h := others[m.recipIdx]
+			m.recipients[h] = !m.recipients[h]
+			m.describeAudience()
+		}
+	case "a":
+		m.selectAll()
+		m.describeAudience()
+	}
+	return m, nil
+}
+
+// describeAudience keeps the user honest about which crypto path a send
+// will take — the whole point of exposing the choice.
+func (m *Model) describeAudience() {
+	sel := m.selectedRecipients()
+	switch {
+	case m.everyoneSelected():
+		m.setStatus("everyone selected — group key (one slot, one grant, any group size)")
+	case m.noneSelected():
+		m.setStatus("no recipients selected — nothing to send")
+	default:
+		m.setStatus("subset (%s) — per-recipient keys: others get no slot, each is revocable alone",
+			strings.Join(sel, ", "))
+	}
+}
+
+func (m Model) keyHistory(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "up", "k":
+		if m.msgIdx > 0 {
+			m.msgIdx--
+			m.renderHistory()
+		}
+	case "down", "j":
+		if m.msgIdx < len(m.msgs)-1 {
+			m.msgIdx++
+			m.renderHistory()
+		}
+	case "h":
+		return m.hideSelected()
+	case "u":
+		return m.unhideSelected()
+	case "r":
+		return m.revokeSelected()
+	}
+	return m, nil
+}
+
+func (m Model) send() (tea.Model, tea.Cmd) {
+	body := strings.TrimSpace(m.input.Value())
+	if body == "" {
+		return m, nil
+	}
+	if m.noneSelected() {
+		m.setStatus("no recipients selected — pick at least one (tab to recipients, space to toggle)")
+		return m, nil
+	}
+	sel := m.selectedRecipients()
+	res, err := m.env.Send(m.conv.Name, body, sel, false)
+	if err != nil {
+		m.setError(err)
+		return m, nil
+	}
+	m.input.SetValue("")
+	if res.Mode == "group" {
+		m.setStatus("sent %s to the group (one shared key)", short(res.ObjectID))
+	} else {
+		m.setStatus("sent %s to %s with per-recipient keys — each revocable alone",
+			short(res.ObjectID), strings.Join(res.Audience, ", "))
+	}
+	// Re-read our own conversation record: LastObject advanced.
+	if c, err := m.env.Conversation(m.conv.Name); err == nil {
+		m.conv = c
+	}
+	return m, m.loadMessages()
+}
+
+func (m Model) selectedMessage() (chat.Message, bool) {
+	if m.msgIdx < 0 || m.msgIdx >= len(m.msgs) {
+		return chat.Message{}, false
+	}
+	return m.msgs[m.msgIdx], true
+}
+
+func (m Model) hideSelected() (tea.Model, tea.Cmd) {
+	sel, ok := m.selectedMessage()
+	if !ok {
+		return m, nil
+	}
+	if err := m.env.Hide(m.conv.Name, sel.ObjectID); err != nil {
+		m.setError(err)
+		return m, nil
+	}
+	m.setStatus("hidden %s — wrapped with zero key slots; press u to restore", short(sel.ObjectID))
+	m.notice = "hide is reversible, but anyone who already read it may have kept a copy — revocation cannot un-share."
+	return m, m.loadMessages()
+}
+
+func (m Model) unhideSelected() (tea.Model, tea.Cmd) {
+	// A hidden message is invisible in the list, so unhide works on the
+	// most recently hidden object this peer owns.
+	owned, err := m.env.St.Owned()
+	if err != nil {
+		m.setError(err)
+		return m, nil
+	}
+	var target string
+	for id, o := range owned {
+		if o.Hidden && o.ConversationID == m.conv.ID {
+			target = id
+			break
+		}
+	}
+	if target == "" {
+		m.setStatus("nothing hidden in this conversation")
+		return m, nil
+	}
+	if err := m.env.Unhide(m.conv.Name, target); err != nil {
+		m.setError(err)
+		return m, nil
+	}
+	m.setStatus("restored %s — every previous grant works again, nothing was re-granted", short(target))
+	return m, m.loadMessages()
+}
+
+func (m Model) revokeSelected() (tea.Model, tea.Cmd) {
+	sel, ok := m.selectedMessage()
+	if !ok {
+		return m, nil
+	}
+	if !sel.Mine {
+		m.setStatus("only the sender can revoke a message")
+		return m, nil
+	}
+	if len(sel.Audience) == 0 {
+		m.setStatus("%s went to the whole group under one shared key — press h to hide it from everyone",
+			short(sel.ObjectID))
+		return m, nil
+	}
+	// Revoke the recipient currently highlighted in the recipient list, so
+	// the action is unambiguous.
+	others := m.others()
+	if m.recipIdx >= len(others) {
+		m.setStatus("highlight a recipient (tab to recipients) to revoke them")
+		return m, nil
+	}
+	target := others[m.recipIdx]
+	layers, slots, err := m.env.RevokeFrom(m.conv.Name, sel.ObjectID, target)
+	if err != nil {
+		m.setError(err)
+		return m, nil
+	}
+	m.setStatus("revoked %s from %s — %d layer(s), %d slot(s); no one else was re-granted",
+		short(sel.ObjectID), target, layers, slots)
+	m.notice = "if they already read it, they may have kept a copy — revocation cannot un-share."
+	return m, m.loadMessages()
+}
+
+func short(id string) string {
+	if len(id) <= 8 {
+		return id
+	}
+	return id[:8]
+}
+
+func sortStrings(s []string) {
+	for i := 1; i < len(s); i++ {
+		for j := i; j > 0 && s[j] < s[j-1]; j-- {
+			s[j], s[j-1] = s[j-1], s[j]
+		}
+	}
+}
+
+var _ = fmt.Sprintf
