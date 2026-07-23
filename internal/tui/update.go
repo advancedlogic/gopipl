@@ -187,6 +187,11 @@ func (m Model) keySetup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) keyConversations(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "q", "esc":
+		if m.showInvite { // close the invite overlay first
+			m.showInvite = false
+			m.status = ""
+			return m, nil
+		}
 		if m.cancelFollow != nil {
 			m.cancelFollow()
 		}
@@ -200,6 +205,26 @@ func (m Model) keyConversations(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.convIdx < len(m.convs)-1 {
 			m.convIdx++
 		}
+		return m, nil
+	case "i":
+		if m.showInvite { // toggle off
+			m.showInvite = false
+			m.status = ""
+			return m, nil
+		}
+		if m.convIdx >= len(m.convs) {
+			m.setStatus("no conversation selected")
+			return m, nil
+		}
+		code, err := m.env.Invite(m.convs[m.convIdx].Name)
+		if err != nil {
+			m.setError(err)
+			return m, nil
+		}
+		m.invite = code
+		m.showInvite = true
+		m.setStatus("invite for %q — copy it to whoever should join (i or esc to close)",
+			m.convs[m.convIdx].Name)
 		return m, nil
 	case "n":
 		m.screen = screenNewConv

@@ -78,6 +78,18 @@ func (m Model) View() string {
 	return ""
 }
 
+// inviteBox renders an invite code in a bordered panel with a note that it
+// carries no key. Shared by the conversation list and the chat view so the
+// reassurance is stated the same way in both.
+func inviteBox(code string, width int) string {
+	return styPanelHot.Width(width).Render(
+		styTitle.Render("invite code") + "\n" +
+			styMuted.Render("Send to whoever should join. It carries no key —\n"+
+				"access still needs a member key sealed to their identity,\n"+
+				"so a stolen code reads nothing.") + "\n\n" +
+			code)
+}
+
 func (m Model) footer(keys string) string {
 	var b strings.Builder
 	b.WriteString("\n")
@@ -155,7 +167,14 @@ func (m Model) viewConversations() string {
 		}
 		b.WriteString("\n" + styMuted.Render("most recent first"))
 	}
-	b.WriteString(m.footer("↑/↓=select  enter=open  n=new  J=join  q=quit"))
+	if m.showInvite {
+		b.WriteString("\n" + inviteBox(m.invite, min(m.width-2, 76)) + "\n")
+	}
+	keys := "↑/↓=select  enter=open  i=invite  n=new  J=join  q=quit"
+	if m.showInvite {
+		keys = "i or esc=close invite"
+	}
+	b.WriteString(m.footer(keys))
 	return b.String()
 }
 
@@ -320,11 +339,7 @@ func (m Model) viewChat() string {
 	width := m.history.Width + m.sidebarWidth() + 2
 
 	if m.showInvite {
-		body = styPanelHot.Width(width).Render(
-			styTitle.Render("invite code") + "\n" +
-				styMuted.Render("Anyone with this can ask to join. It carries no key:\n"+
-					"access still needs a member key sealed to their identity.") + "\n\n" +
-				m.invite)
+		body = inviteBox(m.invite, width)
 		keys = "i or esc=close"
 	}
 

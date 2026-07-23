@@ -244,6 +244,60 @@ func TestChatViewShowsRecipientsAndAudienceModel(t *testing.T) {
 	}
 }
 
+// The invite code must be reachable from the conversation list — that is
+// where you are before opening the chat, and where you go to get the code
+// for someone who hasn't joined yet.
+func TestInviteShownFromConversationList(t *testing.T) {
+	m := newChatModel(t, "alice", "bob")
+	m.screen = screenConversations
+	if err := m.reloadConvs(); err != nil {
+		t.Fatal(err)
+	}
+	sums, err := m.env.Summaries()
+	if err != nil {
+		t.Fatal(err)
+	}
+	m = drive(m, summariesLoaded{summaries: sums}).(Model)
+
+	// The footer must advertise the key, or nobody finds it.
+	if !strings.Contains(m.View(), "i=invite") {
+		t.Fatalf("conversation list does not advertise the invite key:\n%s", m.View())
+	}
+
+	opened := drive(m, keyRunes("i")).(Model)
+	if !opened.showInvite {
+		t.Fatal("i did not open the invite from the list")
+	}
+	view := opened.View()
+	if !strings.Contains(view, "pipl1:") {
+		t.Fatalf("invite code not shown:\n%s", view)
+	}
+	// It must state that the code carries no key, since a user will paste
+	// it into an untrusted channel.
+	if !strings.Contains(view, "no key") {
+		t.Fatalf("invite panel omits the 'carries no key' reassurance:\n%s", view)
+	}
+
+	// Toggles closed, and does not quit the app.
+	closed, cmd := opened.Update(keyRunes("i"))
+	if closed.(Model).showInvite {
+		t.Fatal("i did not close the invite")
+	}
+	if cmd != nil {
+		t.Fatal("closing the invite should not emit a command (it must not quit)")
+	}
+
+	// esc closes the overlay rather than quitting while it is open.
+	reopened := drive(closed.(Model), keyRunes("i")).(Model)
+	afterEsc, cmd := reopened.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if afterEsc.(Model).showInvite {
+		t.Fatal("esc did not close the invite overlay")
+	}
+	if cmd != nil {
+		t.Fatal("esc closed the overlay but also quit — it should only close")
+	}
+}
+
 // Two conversations with the same members are indistinguishable in a bare
 // list, which is how you end up typing into one nobody else is reading.
 // The list must show activity, and put the busiest first.
