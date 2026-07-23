@@ -1,0 +1,25 @@
+# Wails desktop client — ignore build output, installed deps, and generated
+# bindings. Everything here is reproduced by `wails build` / `wails dev` /
+# `wails generate module`, so none of it belongs in version control.
+
+# Wails build artifacts (compiled app, NSIS installer, packaged bundles)
+/build/bin/
+
+# Generated Wails JS/TS bindings — recreated from app.go on every build.
+/frontend/wailsjs/
+
+# Frontend build output and dependencies
+/frontend/dist/
+/frontend/node_modules/
+/frontend/.vite/
+
+# npm/pnpm/yarn debug logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Editor / OS cruft
+.DS_Store
+Thumbs.db
+*.local

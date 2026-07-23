@@ -12,3 +12,6 @@
 # Conversation folders, if created inside the repo while testing: these
 # hold encrypted objects and sealed grants.
 /shared/
+
+# The Wails desktop client has its own desktop/.gitignore for build output,
+# node_modules, and generated bindings.
