@@ -101,4 +101,32 @@ p alice unhide -conv team -object "$OID" 2>&1 | sed 's/^/  /'
 check "$(sees bob 'bob+carol only')" 1 "unhide restored access, nothing re-granted"
 
 echo
+echo "== relay storage survives a server restart (-blobs) =="
+# The relay is memory-only unless -blobs is given. Restart the server with
+# persistence on and confirm a conversation — and a revocation — outlive it.
+kill $SERVER_PID 2>/dev/null || true
+sleep 0.4
+BLOBS="$ROOT/blobs"
+"$ROOT/bin/pipl-server" -addr "127.0.0.1:$PORT" -blobs "$BLOBS" >/dev/null 2>&1 &
+SERVER_PID=$!
+sleep 0.5
+# Everything from before was memory-only, so start fresh on the new store.
+p alice conv new -name durable -with bob >/dev/null 2>&1
+DCODE=$(p alice conv invite -name durable)
+p bob conv join -name durable -invite "$DCODE" >/dev/null 2>&1
+p alice send -conv durable "written to disk" >/dev/null 2>&1
+DOID=$(p alice send -conv durable "then hidden" 2>/dev/null | awk '/^sent/{print $2}')
+p alice hide -conv durable -object "$DOID" >/dev/null 2>&1
+
+kill $SERVER_PID 2>/dev/null || true
+sleep 0.4
+"$ROOT/bin/pipl-server" -addr "127.0.0.1:$PORT" -blobs "$BLOBS" >/dev/null 2>&1 &
+SERVER_PID=$!
+sleep 0.6
+
+dsees() { p "$1" recv -conv durable 2>/dev/null | grep -c "$2"; }
+check "$(dsees bob 'written to disk')" 1 "message survived the server restart"
+check "$(dsees bob 'then hidden')"     0 "hide survived the restart (revocation not undone)"
+
+echo
 if [ "$fail" -eq 0 ]; then echo "== all assertions passed =="; else echo "== FAILURES ABOVE =="; exit 1; fi

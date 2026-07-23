@@ -70,6 +70,11 @@ type Store struct {
 	// byConv indexes blob IDs per conversation so a peer can list what it
 	// should try to open, without the server knowing what any of it says.
 	byConv map[string]map[string]struct{}
+	// dir, when set, persists blobs so a restart does not lose a
+	// conversation. Empty means memory-only. See persist.go.
+	dir string
+	// skipped records blobs that failed to load at startup.
+	skipped []string
 }
 
 func NewStore() *Store {
@@ -119,11 +124,10 @@ func (s *Store) PutObject(convID, id string, data []byte) error {
 			return ErrNotOwner
 		}
 	}
-	s.put(&Blob{
+	return s.store(&Blob{
 		ID: id, Kind: KindObject, ConversationID: convID,
 		Data: data, SignPub: signPub, UpdatedAt: time.Now().UTC(),
 	})
-	return nil
 }
 
 // PutGrant stores a sealed grant blob. Grants are opaque sealed boxes
@@ -143,13 +147,25 @@ func (s *Store) PutGrant(convID, id string, data []byte) error {
 	if _, ok := s.blobs[id]; ok {
 		return errors.New("grant already exists (grants are append-only)")
 	}
-	s.put(&Blob{
+	return s.store(&Blob{
 		ID: id, Kind: KindGrant, ConversationID: convID,
 		Data: data, UpdatedAt: time.Now().UTC(),
 	})
+}
+
+// store persists a blob and then indexes it. Disk first: if the write
+// fails, the caller gets an error and the store still holds the previous
+// version, rather than acknowledging data that would vanish on restart.
+// Callers must hold the lock.
+func (s *Store) store(b *Blob) error {
+	if err := s.persist(b); err != nil {
+		return err
+	}
+	s.put(b)
 	return nil
 }
 
+// put indexes a blob in memory. Callers must hold the lock.
 func (s *Store) put(b *Blob) {
 	s.blobs[b.ID] = b
 	if s.byConv[b.ConversationID] == nil {
@@ -209,14 +225,21 @@ func (s *Store) DeleteObject(id string, sig []byte) error {
 	if !ed25519.Verify(ed25519.PublicKey(b.SignPub), DeleteChallenge(id), sig) {
 		return ErrNotOwner
 	}
+	s.drop(b.ConversationID, id)
+	return nil
+}
+
+// drop removes a blob from memory and from disk. Callers must hold the
+// lock and must already have authorized the removal.
+func (s *Store) drop(convID, id string) {
 	delete(s.blobs, id)
-	if ids := s.byConv[b.ConversationID]; ids != nil {
+	if ids := s.byConv[convID]; ids != nil {
 		delete(ids, id)
 		if len(ids) == 0 {
-			delete(s.byConv, b.ConversationID)
+			delete(s.byConv, convID)
 		}
 	}
-	return nil
+	s.forget(convID, id)
 }
 
 // DeleteGrant removes a grant blob. Sealed grants carry no
@@ -231,13 +254,7 @@ func (s *Store) DeleteGrant(convID, id string) error {
 	if !ok || b.Kind != KindGrant || b.ConversationID != convID {
 		return ErrNotFound
 	}
-	delete(s.blobs, id)
-	if ids := s.byConv[convID]; ids != nil {
-		delete(ids, id)
-		if len(ids) == 0 {
-			delete(s.byConv, convID)
-		}
-	}
+	s.drop(convID, id)
 	return nil
 }
 

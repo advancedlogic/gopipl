@@ -460,8 +460,24 @@ pipl hide   -conv N -object ID            hide from everyone (reversible)
 pipl unhide -conv N -object ID            restore
 ```
 
-`pipl-server [-addr HOST:PORT] [-data FILE]` — defaults to
-`127.0.0.1:8737`. `-data` persists the phonebook across restarts.
+```
+pipl-server [-addr HOST:PORT] [-data FILE] [-blobs DIR]
+```
+
+Defaults to `127.0.0.1:8737`. `-data` persists the phonebook; `-blobs`
+persists relayed messages. **Without `-blobs` the relay is memory-only and
+every relayed conversation is lost when the server stops** — the server
+says so at startup. For anything you want to keep:
+
+```sh
+bin/pipl-server -data ./server/directory.json -blobs ./server/blobs
+```
+
+The blob directory holds ciphertext and nothing else: it is the same
+encrypted bytes a shared folder would hold, one directory per
+conversation, plus a small sidecar recording each object's public signing
+key so the server still knows who is allowed to rewrite it after a
+restart. Folder-backed conversations don't involve it at all.
 
 ---
 

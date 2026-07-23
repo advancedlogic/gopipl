@@ -349,6 +349,13 @@ and their deletion is authorized only by knowing the random blob ID. That
 is the same exposure a shared folder gives anyone who can list it, and
 soft revoke is documented as the weak tier regardless (§6).
 
+Durable means durable across restarts too, when the server is run with
+`-blobs DIR`: blobs are written atomically, deletes remove them, and each
+object's signing key is stored alongside it. That key is what the
+authorization rule above is checked against, so losing it on restart would
+let the next writer inherit someone else's object — it is persisted and
+its absence makes a blob unloadable rather than unowned.
+
 Honest cost of the change: the threat model in §9 shifts. A compromised
 server now yields **ciphertext plus metadata** (who talks to whom, when,
 message sizes and count) rather than metadata alone, and it becomes an
@@ -385,8 +392,7 @@ Status as built; see `docs/STATUS.md` for detail and known shortcuts.
   cannot decrypt and authorizes rewrites by signature. Joining is an
   invite code (A6). Revoke, hide and unhide all work over the network.
 - **v0.5 (next).** `conv rekey` — group-key epoch rotation, which is what
-  closes §10.1 for group-keyed messages. Then relay persistence (blobs
-  are in-memory today, so a server restart loses them).
+  closes §10.1 for group-keyed messages.
 - **v0.6.** Dropbox / S3 backends behind the §8 `Store` interface, with
   hard-revoke semantics validated against provider version history (§6);
   Lambda deployment.
@@ -396,7 +402,9 @@ Status as built; see `docs/STATUS.md` for detail and known shortcuts.
 Deviations from the original plan worth noting: the server arrived with
 SSE instead of WebSockets, and the relay is durable rather than
 store-and-forward (A5, with the threat-model consequences recorded there).
-Relay blobs live in memory, so a server restart loses them — a storage
-backend, not a protocol, concern. AEAD is AES-256-GCM throughout rather
+Relay blobs persist to a directory when the server is given `-blobs`, and
+are memory-only otherwise; the authorization rule travels with each blob,
+so swapping that filesystem store for S3 or DynamoDB changes nothing above
+the `relay.Store` interface. AEAD is AES-256-GCM throughout rather
 than the XChaCha20-Poly1305 secretstream of §3/§4; that swap matters when
 large media payloads land, since streaming is what secretstream buys.

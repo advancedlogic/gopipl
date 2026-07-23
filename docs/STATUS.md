@@ -6,6 +6,14 @@
 `-dir` relays through the server; peers join with an invite code and need
 nothing else in common. Verified end to end by `demo-relay.sh`.
 
+- `pipl-server -blobs DIR` persists relayed ciphertext across restarts:
+  one directory per conversation, each blob beside a sidecar recording
+  its kind and — for objects — the signing key that decides who may
+  rewrite it. Losing that key would let the next writer inherit
+  another peer's object, so it is stored and checked on load. Writes are
+  atomic and deletes remove the files, so a restart cannot undo a
+  revocation.
+
 - The server stores ciphertext it cannot decrypt, and authorizes writes
   by verifying each object's Ed25519 signature: the first write of an
   object ID pins its signing key, later writes must match it. So only an
@@ -91,8 +99,10 @@ CLI: `init` / `conv new` / `conv join` / `send [-separate]` /
 - `conv rekey` is still missing, so revoking one member of a
   whole-roster send is not possible — the UI says so and points at
   hide or a subset send.
-- Relay blobs are held in memory: restarting the server loses every
-  relayed conversation. Persistence is the next relay task.
+- The relay is memory-only unless the server is started with `-blobs DIR`;
+  without it, restarting loses every relayed conversation. The server
+  warns about this at startup. There is no expiry or quota on a
+  persisted store yet — it grows until an owner deletes objects.
 - Relay grant deletion (soft revoke) is authorized only by knowing the
   random blob ID, because a sealed grant carries no signature the server
   can check. Same exposure as a listable shared folder, and soft revoke

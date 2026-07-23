@@ -49,13 +49,16 @@ stores ciphertext it cannot decrypt. Peers join with a pasted invite code
 and need nothing else in common:
 
 ```sh
-bin/pipl-server &
+bin/pipl-server -blobs ./server/blobs &     # -blobs = survive restarts
 
 bin/pipl -home ./peers/alice conv new -name team -with bob,carol
 # -> invite: pipl1:eyJpIjoi...
 
 bin/pipl -home ./peers/bob conv join -name team -invite pipl1:eyJpIjoi...
 ```
+
+Without `-blobs` the relay keeps everything in memory and a restart loses
+it; the server prints a warning saying so.
 
 Revoke, hide and unhide all work this way: the server verifies each
 object's signature, so only its owner can rewrite or delete it. An invite
@@ -224,6 +227,5 @@ external modules, and none of them touch key material.
 ## Next (per design doc roadmap)
 
 `conv rekey` (group key rotation = per-member revocation for whole-roster
-sends) · relay persistence (blobs are in-memory, so a server restart loses
-them) · Dropbox/S3 backends, Lambda deployment · payload padding ·
+sends) · Dropbox/S3 backends, Lambda deployment · payload padding ·
 multi-device identity.

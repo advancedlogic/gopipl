@@ -135,6 +135,7 @@ func (d *directory) lookup(handle string) (identity.PublicIdentity, bool) {
 func main() {
 	addr := flag.String("addr", "127.0.0.1:8737", "listen address")
 	dataFile := flag.String("data", "", "optional file to persist the identity directory")
+	blobDir := flag.String("blobs", "", "optional directory to persist relayed blobs (ciphertext); memory-only if unset")
 	flag.Parse()
 
 	dir, err := newDirectory(*dataFile)
@@ -142,7 +143,13 @@ func main() {
 		log.Fatal(err)
 	}
 	h := newHub()
-	blobs := relay.NewStore()
+	blobs, err := relay.OpenStore(*blobDir)
+	if err != nil {
+		log.Fatal(err)
+	}
+	for _, s := range blobs.Skipped() {
+		log.Printf("warning: skipped unreadable blob %s", s)
+	}
 
 	mux := http.NewServeMux()
 
@@ -310,6 +317,11 @@ func main() {
 
 	log.Printf("pipl-server listening on %s", *addr)
 	log.Print("  keyless: identity directory, notifications, and a blob relay that stores only ciphertext")
+	if *blobDir == "" {
+		log.Print("  relay storage: MEMORY ONLY — relayed conversations are lost on restart (-blobs DIR to persist)")
+	} else {
+		log.Printf("  relay storage: %s", *blobDir)
+	}
 	log.Fatal(http.ListenAndServe(*addr, mux))
 }
 
